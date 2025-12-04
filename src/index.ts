@@ -142,7 +142,7 @@ async function handleProductRequest(
       status: backendResponse.status,
       headers: {
         "content-type": backendResponse.headers.get("content-type") || "application/json",
-        "cache-control": "public, max-age=60, stale-while-revalidate=120",
+        "cache-control": "public, max-age=31536000, stale-while-revalidate=31536000",
       },
     });
 
@@ -253,7 +253,7 @@ async function handleProductListRequest(
       status: backendResponse.status,
       headers: {
         "content-type": backendResponse.headers.get("content-type") || "application/json",
-        "cache-control": "public, max-age=60, stale-while-revalidate=120",
+        "cache-control": "public, max-age=31536000, stale-while-revalidate=31536000",
       },
     });
 

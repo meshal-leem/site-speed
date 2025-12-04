@@ -6,29 +6,29 @@ compatibility_date = "2025-11-28"
 # DEFAULT ENV (local/dev)
 # -----------------------
 [vars]
-BACKEND_PRODUCT_URL = "https://api.staging.leem.com/leem/catalog/product"
-BACKEND_PRODUCT_LIST_URL = "https://api.staging.leem.com/leem/catalog/products"
-ALLOWED_ORIGIN = "https://staging.leem.com"
+BACKEND_PRODUCT_URL = "https://api.leem.com/leem/catalog/product"
+BACKEND_PRODUCT_LIST_URL = "https://api.leem.com/leem/catalog/products"
+ALLOWED_ORIGIN = "http://localhost:3000"
 
 # -----------------------
-# ENV #1 — LEEM STAGING
+# ENV #1 — LEEM PROD
 # -----------------------
 [env.leem]
-name = "edge-api-layer-leem-staging"
+name = "edge-api-layer-leem-prod"
 
 [env.leem.vars]
-BACKEND_PRODUCT_URL = "https://api.staging.leem.com/leem/catalog/product"
-BACKEND_PRODUCT_LIST_URL = "https://api.staging.leem.com/leem/catalog/products"
-ALLOWED_ORIGIN = "https://staging.leem.com"
+BACKEND_PRODUCT_URL = "https://api.leem.com/leem/catalog/product"
+BACKEND_PRODUCT_LIST_URL = "https://api.leem.com/leem/catalog/products"
+ALLOWED_ORIGIN = "http://localhost:3000"
 
 
 # -----------------------
-# ENV #2 — AURA STAGING
+# ENV #2 — AURA PROD
 # -----------------------
 [env.aura]
-name = "edge-api-layer-aura-staging"
+name = "edge-api-layer-aura-prod"
 
 [env.aura.vars]
-BACKEND_PRODUCT_URL = "https://api.staging.auraliving.com/aura/catalog/product"
-BACKEND_PRODUCT_LIST_URL = "https://api.staging.auraliving.com/aura/catalog/products"
+BACKEND_PRODUCT_URL = "https://api.auraliving.com/aura/catalog/product"
+BACKEND_PRODUCT_LIST_URL = "https://api.auraliving.com/aura/catalog/products"
 ALLOWED_ORIGIN = "http://localhost:3000"
