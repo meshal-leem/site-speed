@@ -8,8 +8,7 @@ compatibility_date = "2025-11-28"
 [vars]
 BACKEND_PRODUCT_URL = "https://api.staging.leem.com/leem/catalog/product"
 BACKEND_PRODUCT_LIST_URL = "https://api.staging.leem.com/leem/catalog/products"
-ALLOWED_ORIGIN = "https://staging.leem.com"
-
+ALLOWED_ORIGINS = "https://staging.leem.com,http://localhost:3000"
 # -----------------------
 # ENV #1 — LEEM STAGING
 # -----------------------
@@ -19,8 +18,7 @@ name = "edge-api-layer-leem-staging"
 [env.leem.vars]
 BACKEND_PRODUCT_URL = "https://api.staging.leem.com/leem/catalog/product"
 BACKEND_PRODUCT_LIST_URL = "https://api.staging.leem.com/leem/catalog/products"
-ALLOWED_ORIGIN = "https://staging.leem.com"
-
+ALLOWED_ORIGINS = "https://staging.leem.com,http://localhost:3000"
 
 # -----------------------
 # ENV #2 — AURA STAGING
@@ -31,4 +29,4 @@ name = "edge-api-layer-aura-staging"
 [env.aura.vars]
 BACKEND_PRODUCT_URL = "https://api.staging.auraliving.com/aura/catalog/product"
 BACKEND_PRODUCT_LIST_URL = "https://api.staging.auraliving.com/aura/catalog/products"
-ALLOWED_ORIGIN = "http://localhost:3000"
+ALLOWED_ORIGINS = "https://staging.auraliving.com,http://localhost:3000"

@@ -14,3 +14,9 @@ site-speed-edge-api-layer/
 wrangler dev
 
 wrangler login
+
+wrangler deploy --env aura  
+https://edge-api-layer-aura-staging.stagingleem.workers.dev
+
+wrangler deploy
+https://edge-api-layer.stagingleem.workers.dev
