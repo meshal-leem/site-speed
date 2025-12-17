@@ -108,15 +108,17 @@ async function handleProductRequest(
 ): Promise<Response> {
   const url = new URL(request.url);
 
+  const forceMiss = (url.searchParams.get("type") || "").toLowerCase() === "miss";
   const region = (url.searchParams.get("region") || "sa").toLowerCase();
   const language = (url.searchParams.get("language") || "en").toLowerCase();
 
+  // Normalize cache key so debug params (e.g. type=miss) do not fragment the cache
   const cacheKeyUrl = `${url.origin}/products/${slug}?region=${region}&language=${language}`;
   const cacheKey = new Request(cacheKeyUrl, { method: "GET" });
   const cache = caches.default;
 
   // 1. Try Cache
-  let cachedResponse = await cache.match(cacheKey);
+  let cachedResponse = forceMiss ? null : await cache.match(cacheKey);
 
   if (cachedResponse) {
     // CACHE HIT: Fire background update
@@ -143,8 +145,13 @@ async function handleProductListRequest(
   ctx: ExecutionContext
 ): Promise<Response> {
   const url = new URL(request.url);
+  const forceMiss = (url.searchParams.get("type") || "").toLowerCase() === "miss";
+
   const cache = caches.default;
-  const cacheKey = new Request(url.toString(), { method: "GET" });
+  // Normalize cache key so debug params (e.g. type=miss) do not fragment the cache
+  const cacheUrl = new URL(url.toString());
+  cacheUrl.searchParams.delete("type");
+  const cacheKey = new Request(cacheUrl.toString(), { method: "GET" });
 
   const page = parseInt(url.searchParams.get("page") || "1", 10);
   const count = parseInt(url.searchParams.get("count") || "24", 10);
@@ -170,7 +177,7 @@ async function handleProductListRequest(
   if (collection) backendBody.collection = collection;
 
   // 1. Try Cache
-  let cachedResponse = await cache.match(cacheKey);
+  let cachedResponse = forceMiss ? null : await cache.match(cacheKey);
 
   if (cachedResponse) {
     // CACHE HIT: Fire background update
