@@ -6,9 +6,9 @@ compatibility_date = "2025-11-28"
 # DEFAULT ENV (local/dev)
 # -----------------------
 [vars]
-BACKEND_PRODUCT_URL = "https://api.leem.com/leem/catalog/product"
-BACKEND_PRODUCT_LIST_URL = "https://api.leem.com/leem/catalog/products"
-BACKEND_CATEGORY_TREE_URL = "https://api.leem.com/leem/catalog/category/tree"
+BACKEND_PRODUCT_URL = "https://api.staging.leem.com/leem/catalog/product"
+BACKEND_PRODUCT_LIST_URL = "https://api.staging.leem.com/leem/catalog/products"
+BACKEND_CATEGORY_TREE_URL = "https://api.staging.leem.com/leem/catalog/category/tree"
 ALLOWED_ORIGIN = "http://localhost:3000"
 ADMIN_USER = "meshal@leem.com"
 ADMIN_PASS = "HeeHee@123"
@@ -32,9 +32,9 @@ new_sqlite_classes = ["VisitCounter"]
 name = "edge-api-layer-leem-prod"
 
 [env.leem.vars]
-BACKEND_PRODUCT_URL = "https://api.leem.com/leem/catalog/product"
-BACKEND_PRODUCT_LIST_URL = "https://api.leem.com/leem/catalog/products"
-BACKEND_CATEGORY_TREE_URL = "https://api.leem.com/leem/catalog/category/tree"
+BACKEND_PRODUCT_URL = "https://api.staging.leem.com/leem/catalog/product"
+BACKEND_PRODUCT_LIST_URL = "https://api.staging.leem.com/leem/catalog/products"
+BACKEND_CATEGORY_TREE_URL = "https://api.staging.leem.com/leem/catalog/category/tree"
 ALLOWED_ORIGIN = "http://localhost:3000"
 ADMIN_USER = "meshal@leem.com"
 ADMIN_PASS = "HeeHee@123"
@@ -52,9 +52,9 @@ preview_id = "fbb5c15c16d9485eaf6abc1367d38432"
 name = "edge-api-layer-aura-prod"
 
 [env.aura.vars]
-BACKEND_PRODUCT_URL = "https://api.auraliving.com/aura/catalog/product"
-BACKEND_PRODUCT_LIST_URL = "https://api.auraliving.com/aura/catalog/products"
-BACKEND_CATEGORY_TREE_URL = "https://api.auraliving.com/aura/catalog/category/tree"
+BACKEND_PRODUCT_URL = "https://api.staging.auraliving.com/aura/catalog/product"
+BACKEND_PRODUCT_LIST_URL = "https://api.staging.auraliving.com/aura/catalog/products"
+BACKEND_CATEGORY_TREE_URL = "https://api.staging.auraliving.com/aura/catalog/category/tree"
 ALLOWED_ORIGIN = "http://localhost:3000"
 ADMIN_USER = "meshal@leem.com"
 ADMIN_PASS = "HeeHee@123"
