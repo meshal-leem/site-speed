@@ -29,7 +29,7 @@ new_sqlite_classes = ["VisitCounter"]
 # ENV #1 — LEEM PROD
 # -----------------------
 [env.leem]
-name = "edge-api-layer-leem-prod"
+name = "edge-api-layer-leem-staging"
 
 [env.leem.vars]
 BACKEND_PRODUCT_URL = "https://api.staging.leem.com/leem/catalog/product"
@@ -49,13 +49,13 @@ preview_id = "fbb5c15c16d9485eaf6abc1367d38432"
 # ENV #2 — AURA PROD
 # -----------------------
 [env.aura]
-name = "edge-api-layer-aura-prod"
+name = "edge-api-layer-aura-staging"
 
 [env.aura.vars]
 BACKEND_PRODUCT_URL = "https://api.staging.auraliving.com/aura/catalog/product"
 BACKEND_PRODUCT_LIST_URL = "https://api.staging.auraliving.com/aura/catalog/products"
 BACKEND_CATEGORY_TREE_URL = "https://api.staging.auraliving.com/aura/catalog/category/tree"
-ALLOWED_ORIGIN = "http://localhost:3000"
+ALLOWED_ORIGIN = "https://staging.auraliving.com"
 ADMIN_USER = "meshal@leem.com"
 ADMIN_PASS = "HeeHee@123"
 
@@ -63,3 +63,24 @@ ADMIN_PASS = "HeeHee@123"
 binding = "CACHE_META"
 id = "a27d83f173e6412d8736694038a976d4"
 preview_id = "5459b2f6827b4da8b24eae972cf61331"
+
+# -----------------------
+# ENV #3 — LEEM STAGING
+# -----------------------
+[env.staging]
+name = "edge-api-layer-leem-staging"
+
+[env.staging.vars]
+BACKEND_PRODUCT_URL = "https://api.staging.leem.com/leem/catalog/product"
+BACKEND_PRODUCT_LIST_URL = "https://api.staging.leem.com/leem/catalog/products"
+BACKEND_CATEGORY_TREE_URL = "https://api.staging.leem.com/leem/catalog/category/tree"
+ALLOWED_ORIGIN = "http://localhost:3000"
+ADMIN_USER = "meshal@leem.com"
+ADMIN_PASS = "HeeHee@123"
+
+[env.staging.durable_objects]
+bindings = [{ name = "VISIT_COUNTER", class_name = "VisitCounter" }]
+
+[[env.staging.kv_namespaces]]
+binding = "CACHE_META"
+id = "38a92fff0b964ae3bc0dce1b138ca7a4"

@@ -20,3 +20,6 @@ https://edge-api-layer-leem-prod.stagingleem.workers.dev
 
 wrangler deploy --env aura
 https://edge-api-layer-aura-prod.stagingleem.workers.dev
+
+
+wrangler deploy --env staging
