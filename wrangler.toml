@@ -9,7 +9,7 @@ compatibility_date = "2025-11-28"
 BACKEND_PRODUCT_URL = "https://api.leem.com/leem/catalog/product"
 BACKEND_PRODUCT_LIST_URL = "https://api.leem.com/leem/catalog/products"
 BACKEND_CATEGORY_TREE_URL = "https://api.leem.com/leem/catalog/category/tree"
-ALLOWED_ORIGIN = "http://localhost:3000"
+ALLOWED_ORIGINS = "http://localhost:3000"
 ADMIN_USER = "meshal@leem.com"
 ADMIN_PASS = "HeeHee@123"
 
@@ -17,6 +17,11 @@ ADMIN_PASS = "HeeHee@123"
 binding = "CACHE_META"
 id = "b5ac5c1d81fb4d34b0f80757e43d8936"
 preview_id = "590b038b526643b6a10df4cb0163870b"
+
+[[d1_databases]]
+binding = "CACHE_DB"
+database_name = "edge-cache-leem-staging"
+database_id = "66b75180-b9cd-4eaf-83e6-677000f81277"
 
 [durable_objects]
 bindings = [{ name = "VISIT_COUNTER", class_name = "VisitCounter" }]
@@ -35,9 +40,17 @@ name = "edge-api-layer-leem-prod"
 BACKEND_PRODUCT_URL = "https://api.leem.com/leem/catalog/product"
 BACKEND_PRODUCT_LIST_URL = "https://api.leem.com/leem/catalog/products"
 BACKEND_CATEGORY_TREE_URL = "https://api.leem.com/leem/catalog/category/tree"
-ALLOWED_ORIGIN = "http://localhost:3000"
+ALLOWED_ORIGINS = "http://localhost:3000,https://leem.com"
 ADMIN_USER = "meshal@leem.com"
 ADMIN_PASS = "HeeHee@123"
+
+[env.leem.durable_objects]
+bindings = [{ name = "VISIT_COUNTER", class_name = "VisitCounter" }]
+
+[[env.leem.d1_databases]]
+binding = "CACHE_DB"
+database_name = "edge-cache-leem"
+database_id = "14598393-99cc-43ed-9007-f37933bab383"
 
 [[env.leem.kv_namespaces]]
 binding = "CACHE_META"
@@ -55,11 +68,71 @@ name = "edge-api-layer-aura-prod"
 BACKEND_PRODUCT_URL = "https://api.auraliving.com/aura/catalog/product"
 BACKEND_PRODUCT_LIST_URL = "https://api.auraliving.com/aura/catalog/products"
 BACKEND_CATEGORY_TREE_URL = "https://api.auraliving.com/aura/catalog/category/tree"
-ALLOWED_ORIGIN = "http://localhost:3000"
+ALLOWED_ORIGINS = "http://localhost:3000,https://auraliving.com"
 ADMIN_USER = "meshal@leem.com"
 ADMIN_PASS = "HeeHee@123"
+
+[env.aura.durable_objects]
+bindings = [{ name = "VISIT_COUNTER", class_name = "VisitCounter" }]
+
+[[env.aura.d1_databases]]
+binding = "CACHE_DB"
+database_name = "edge-cache-aura"
+database_id = "55c325d0-b611-4841-9ed9-b4be1e4609c6"
 
 [[env.aura.kv_namespaces]]
 binding = "CACHE_META"
 id = "a27d83f173e6412d8736694038a976d4"
 preview_id = "5459b2f6827b4da8b24eae972cf61331"
+
+# -----------------------
+# ENV #3 — LEEM STAGING
+# -----------------------
+[env.staging]
+name = "edge-api-layer-leem-staging"
+
+[env.staging.vars]
+BACKEND_PRODUCT_URL = "https://api.staging.leem.com/leem/catalog/product"
+BACKEND_PRODUCT_LIST_URL = "https://api.staging.leem.com/leem/catalog/products"
+BACKEND_CATEGORY_TREE_URL = "https://api.staging.leem.com/leem/catalog/category/tree"
+ALLOWED_ORIGINS = "http://localhost:3000,https://staging.leem.com"
+ADMIN_USER = "meshal@leem.com"
+ADMIN_PASS = "HeeHee@123"
+
+[env.staging.durable_objects]
+bindings = [{ name = "VISIT_COUNTER", class_name = "VisitCounter" }]
+
+[[env.staging.d1_databases]]
+binding = "CACHE_DB"
+database_name = "edge-cache-leem-staging"
+database_id = "66b75180-b9cd-4eaf-83e6-677000f81277"
+
+[[env.staging.kv_namespaces]]
+binding = "CACHE_META"
+id = "38a92fff0b964ae3bc0dce1b138ca7a4"
+
+# -----------------------
+# ENV #4 — AURA STAGING
+# -----------------------
+[env.aura_staging]
+name = "edge-api-layer-aura-staging"
+
+[env.aura_staging.vars]
+BACKEND_PRODUCT_URL = "https://api.staging.auraliving.com/aura/catalog/product"
+BACKEND_PRODUCT_LIST_URL = "https://api.staging.auraliving.com/aura/catalog/products"
+BACKEND_CATEGORY_TREE_URL = "https://api.staging.auraliving.com/aura/catalog/category/tree"
+ALLOWED_ORIGINS = "http://localhost:3000,https://staging.auraliving.com"
+ADMIN_USER = "meshal@leem.com"
+ADMIN_PASS = "HeeHee@123"
+
+[env.aura_staging.durable_objects]
+bindings = [{ name = "VISIT_COUNTER", class_name = "VisitCounter" }]
+
+[[env.aura_staging.d1_databases]]
+binding = "CACHE_DB"
+database_name = "edge-cache-aura-staging"
+database_id = "02010dab-f5d8-4f86-95e8-2a9e16d243f1"
+
+[[env.aura_staging.kv_namespaces]]
+binding = "CACHE_META"
+id = "fd8f2af9651b4d6d8c5b57a49ccad99c"

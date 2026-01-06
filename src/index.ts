@@ -7,12 +7,16 @@ interface Env {
   BACKEND_PRODUCT_LIST_URL: string;
   BACKEND_CATEGORY_TREE_URL: string;
   ALLOWED_ORIGIN: string;
+  ALLOWED_ORIGINS?: string;
   ADMIN_USER: string;
   ADMIN_PASS: string;
   WEBHOOK_TOKEN: string;
   CACHE_META: KVNamespace;
   VISIT_COUNTER: DurableObjectNamespace;
+  CACHE_DB: D1Database;
 }
+
+const CACHE_TTL_SECONDS = 60 * 60 * 24 * 7;
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -123,7 +127,11 @@ function handleOptions(env: Env, request: Request): Response {
   };
 
   const origin = request.headers.get("origin");
-  if (origin && origin === env.ALLOWED_ORIGIN) {
+  const allowList = (env.ALLOWED_ORIGINS || env.ALLOWED_ORIGIN || "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (origin && allowList.includes(origin)) {
     headers["access-control-allow-origin"] = origin;
     headers["vary"] = "Origin"; // Important for caching
   }
@@ -141,6 +149,7 @@ async function handleProductPostRequest(
   slug: string
 ): Promise<Response> {
   const url = new URL(request.url);
+  console.log("PDP POST request", { url: url.toString(), slug });
   const body = await parseJsonBody(request);
   if (!body) {
     return new Response(JSON.stringify({ error: "Invalid JSON body" }), {
@@ -154,17 +163,37 @@ async function handleProductPostRequest(
   const language = (String(body.language || url.searchParams.get("language") || "en")).toLowerCase();
 
   const cacheKeyUrl = `${url.origin}/products/${slug}?region=${region}&language=${language}`;
-  const cacheKey = new Request(cacheKeyUrl, { method: "GET" });
-  const cache = caches.default;
   ctx.waitUntil(incrementVisit(env, "pdp", cacheKeyUrl));
+  console.log("PDP POST cache key", { cacheKeyUrl });
 
-  let cachedResponse = await cache.match(cacheKey);
-  if (cachedResponse) {
-    const res = new Response(cachedResponse.body, cachedResponse);
+  const totalStart = Date.now();
+  const edgeStart = Date.now();
+  const edgeCached = await getEdgeCache(cacheKeyUrl);
+  if (edgeCached) {
+    const timings = { edge: Date.now() - edgeStart, d1: 0, total: Date.now() - totalStart };
+    console.log("PDP POST edge cache HIT", { cacheKeyUrl });
+    const res = new Response(edgeCached.body, edgeCached);
     res.headers.set("x-edge-cache", "HIT");
+    addCacheDebugHeaders(res, "edge", timings);
     addCorsHeaders(res, env, request);
     return res;
   }
+
+  const d1Start = Date.now();
+  const cachedResponse = await getSharedCache(env, cacheKeyUrl);
+  if (cachedResponse) {
+    const timings = { edge: Date.now() - edgeStart, d1: Date.now() - d1Start, total: Date.now() - totalStart };
+    console.log("PDP POST cache HIT", { cacheKeyUrl });
+    const cachedText = await cachedResponse.clone().text();
+    ctx.waitUntil(putEdgeCacheFromText(cacheKeyUrl, cachedText, cachedResponse.status, Object.fromEntries(cachedResponse.headers)));
+    const res = new Response(cachedResponse.body, cachedResponse);
+    res.headers.set("x-edge-cache", "HIT");
+    addCacheDebugHeaders(res, "d1", timings);
+    addCorsHeaders(res, env, request);
+    return res;
+  }
+  const timingsMiss = { edge: Date.now() - edgeStart, d1: Date.now() - d1Start, total: Date.now() - totalStart };
+  console.log("PDP POST cache MISS", { cacheKeyUrl });
 
   try {
     const backendResponse = await fetchPdpBackend(env, request, slug, region, language);
@@ -181,14 +210,16 @@ async function handleProductPostRequest(
       status: backendResponse.status,
       headers: {
         "content-type": backendResponse.headers.get("content-type") || "application/json",
-        "cache-control": "public, max-age=31536000, stale-while-revalidate=31536000",
+        "cache-control": `public, max-age=${CACHE_TTL_SECONDS}, stale-while-revalidate=${CACHE_TTL_SECONDS}`,
       },
     });
 
     edgeResponse.headers.set("x-edge-cache", "MISS");
+    addCacheDebugHeaders(edgeResponse, "miss", timingsMiss);
     addCorsHeaders(edgeResponse, env, request);
 
-    ctx.waitUntil(cache.put(cacheKey, edgeResponse.clone()));
+    ctx.waitUntil(putSharedCacheFromText(env, cacheKeyUrl, textBody, edgeResponse.status, Object.fromEntries(edgeResponse.headers)));
+    ctx.waitUntil(putEdgeCacheFromText(cacheKeyUrl, textBody, edgeResponse.status, Object.fromEntries(edgeResponse.headers)));
     ctx.waitUntil(recordCacheMeta(env, "pdp", cacheKeyUrl, {
       synced: false,
       source: "post",
@@ -211,6 +242,7 @@ async function handleProductListPostRequest(
   ctx: ExecutionContext
 ): Promise<Response> {
   const url = new URL(request.url);
+  console.log("PLP POST request", { url: url.toString() });
   const body = await parseJsonBody(request);
   if (!body) {
     return new Response(JSON.stringify({ error: "Invalid JSON body" }), {
@@ -222,17 +254,37 @@ async function handleProductListPostRequest(
 
   const backendBody = normalizePlpBody(body);
   const cacheKeyUrl = buildPlpCacheKeyUrl(url.origin, backendBody);
-  const cacheKey = new Request(cacheKeyUrl, { method: "GET" });
-  const cache = caches.default;
   ctx.waitUntil(incrementVisit(env, "plp", cacheKeyUrl));
+  console.log("PLP POST cache key", { cacheKeyUrl });
 
-  let cachedResponse = await cache.match(cacheKey);
-  if (cachedResponse) {
-    const res = new Response(cachedResponse.body, cachedResponse);
+  const totalStart = Date.now();
+  const edgeStart = Date.now();
+  const edgeCached = await getEdgeCache(cacheKeyUrl);
+  if (edgeCached) {
+    const timings = { edge: Date.now() - edgeStart, d1: 0, total: Date.now() - totalStart };
+    console.log("PLP POST edge cache HIT", { cacheKeyUrl });
+    const res = new Response(edgeCached.body, edgeCached);
     res.headers.set("x-edge-cache", "HIT");
+    addCacheDebugHeaders(res, "edge", timings);
     addCorsHeaders(res, env, request);
     return res;
   }
+
+  const d1Start = Date.now();
+  const cachedResponse = await getSharedCache(env, cacheKeyUrl);
+  if (cachedResponse) {
+    const timings = { edge: Date.now() - edgeStart, d1: Date.now() - d1Start, total: Date.now() - totalStart };
+    console.log("PLP POST cache HIT", { cacheKeyUrl });
+    const cachedText = await cachedResponse.clone().text();
+    ctx.waitUntil(putEdgeCacheFromText(cacheKeyUrl, cachedText, cachedResponse.status, Object.fromEntries(cachedResponse.headers)));
+    const res = new Response(cachedResponse.body, cachedResponse);
+    res.headers.set("x-edge-cache", "HIT");
+    addCacheDebugHeaders(res, "d1", timings);
+    addCorsHeaders(res, env, request);
+    return res;
+  }
+  const timingsMiss = { edge: Date.now() - edgeStart, d1: Date.now() - d1Start, total: Date.now() - totalStart };
+  console.log("PLP POST cache MISS", { cacheKeyUrl });
 
   const incomingHeaders = request.headers;
   const backendHeaders: Record<string, string> = {
@@ -263,14 +315,16 @@ async function handleProductListPostRequest(
       status: backendResponse.status,
       headers: {
         "content-type": backendResponse.headers.get("content-type") || "application/json",
-        "cache-control": "public, max-age=31536000, stale-while-revalidate=31536000",
+        "cache-control": `public, max-age=${CACHE_TTL_SECONDS}, stale-while-revalidate=${CACHE_TTL_SECONDS}`,
       },
     });
 
     edgeResponse.headers.set("x-edge-cache", "MISS");
+    addCacheDebugHeaders(edgeResponse, "miss", timingsMiss);
     addCorsHeaders(edgeResponse, env, request);
 
-    ctx.waitUntil(cache.put(cacheKey, edgeResponse.clone()));
+    ctx.waitUntil(putSharedCacheFromText(env, cacheKeyUrl, textBody, edgeResponse.status, Object.fromEntries(edgeResponse.headers)));
+    ctx.waitUntil(putEdgeCacheFromText(cacheKeyUrl, textBody, edgeResponse.status, Object.fromEntries(edgeResponse.headers)));
     ctx.waitUntil(recordCacheMeta(env, "plp", cacheKeyUrl, {
       synced: false,
       source: "post",
@@ -297,24 +351,45 @@ async function handleProductRequest(
   slug: string
 ): Promise<Response> {
   const url = new URL(request.url);
+  console.log("PDP GET request", { url: url.toString(), slug });
 
   const region = (url.searchParams.get("region") || "sa").toLowerCase();
   const language = (url.searchParams.get("language") || "en").toLowerCase();
 
   // Create a cache key specific to this request variation
   const cacheKeyUrl = `${url.origin}/products/${slug}?region=${region}&language=${language}`;
-  const cacheKey = new Request(cacheKeyUrl, { method: "GET" });
-  const cache = caches.default;
   ctx.waitUntil(incrementVisit(env, "pdp", cacheKeyUrl));
+  console.log("PDP GET cache key", { cacheKeyUrl });
 
   // 1. Try Cache
-  let cachedResponse = await cache.match(cacheKey);
-  if (cachedResponse) {
-    const res = new Response(cachedResponse.body, cachedResponse);
+  const totalStart = Date.now();
+  const edgeStart = Date.now();
+  const edgeCached = await getEdgeCache(cacheKeyUrl);
+  if (edgeCached) {
+    const timings = { edge: Date.now() - edgeStart, d1: 0, total: Date.now() - totalStart };
+    console.log("PDP GET edge cache HIT", { cacheKeyUrl });
+    const res = new Response(edgeCached.body, edgeCached);
     res.headers.set("x-edge-cache", "HIT");
+    addCacheDebugHeaders(res, "edge", timings);
     addCorsHeaders(res, env, request);
     return res;
   }
+
+  const d1Start = Date.now();
+  const cachedResponse = await getSharedCache(env, cacheKeyUrl);
+  if (cachedResponse) {
+    const timings = { edge: Date.now() - edgeStart, d1: Date.now() - d1Start, total: Date.now() - totalStart };
+    console.log("PDP GET cache HIT", { cacheKeyUrl });
+    const cachedText = await cachedResponse.clone().text();
+    ctx.waitUntil(putEdgeCacheFromText(cacheKeyUrl, cachedText, cachedResponse.status, Object.fromEntries(cachedResponse.headers)));
+    const res = new Response(cachedResponse.body, cachedResponse);
+    res.headers.set("x-edge-cache", "HIT");
+    addCacheDebugHeaders(res, "d1", timings);
+    addCorsHeaders(res, env, request);
+    return res;
+  }
+  const timingsMiss = { edge: Date.now() - edgeStart, d1: Date.now() - d1Start, total: Date.now() - totalStart };
+  console.log("PDP GET cache MISS", { cacheKeyUrl });
 
   // 2. Prepare Backend Request
   try {
@@ -338,15 +413,17 @@ async function handleProductRequest(
       status: backendResponse.status,
       headers: {
         "content-type": backendResponse.headers.get("content-type") || "application/json",
-        "cache-control": "public, max-age=31536000, stale-while-revalidate=31536000",
+        "cache-control": `public, max-age=${CACHE_TTL_SECONDS}, stale-while-revalidate=${CACHE_TTL_SECONDS}`,
       },
     });
 
     edgeResponse.headers.set("x-edge-cache", "MISS");
+    addCacheDebugHeaders(edgeResponse, "miss", timingsMiss);
     addCorsHeaders(edgeResponse, env, request);
 
     // 4. Update Cache (Non-blocking)
-    ctx.waitUntil(cache.put(cacheKey, edgeResponse.clone()));
+    ctx.waitUntil(putSharedCacheFromText(env, cacheKeyUrl, textBody, edgeResponse.status, Object.fromEntries(edgeResponse.headers)));
+    ctx.waitUntil(putEdgeCacheFromText(cacheKeyUrl, textBody, edgeResponse.status, Object.fromEntries(edgeResponse.headers)));
     ctx.waitUntil(recordCacheMeta(env, "pdp", cacheKeyUrl, { synced: false, source: "get" }));
 
     return edgeResponse;
@@ -369,22 +446,43 @@ async function handleProductListRequest(
   ctx: ExecutionContext
 ): Promise<Response> {
   const url = new URL(request.url);
-  const cache = caches.default;
+  console.log("PLP GET request", { url: url.toString() });
 
   // Normalize cache key so equivalent query params don't create duplicates.
   const backendBody = buildPlpBodyFromUrl(url);
   const cacheKeyUrl = buildPlpCacheKeyUrl(url.origin, backendBody);
-  const cacheKey = new Request(cacheKeyUrl, { method: "GET" });
   ctx.waitUntil(incrementVisit(env, "plp", cacheKeyUrl));
+  console.log("PLP GET cache key", { cacheKeyUrl });
 
   // 1. Try Cache
-  let cachedResponse = await cache.match(cacheKey);
-  if (cachedResponse) {
-    const res = new Response(cachedResponse.body, cachedResponse);
+  const totalStart = Date.now();
+  const edgeStart = Date.now();
+  const edgeCached = await getEdgeCache(cacheKeyUrl);
+  if (edgeCached) {
+    const timings = { edge: Date.now() - edgeStart, d1: 0, total: Date.now() - totalStart };
+    console.log("PLP GET edge cache HIT", { cacheKeyUrl });
+    const res = new Response(edgeCached.body, edgeCached);
     res.headers.set("x-edge-cache", "HIT");
+    addCacheDebugHeaders(res, "edge", timings);
     addCorsHeaders(res, env, request);
     return res;
   }
+
+  const d1Start = Date.now();
+  const cachedResponse = await getSharedCache(env, cacheKeyUrl);
+  if (cachedResponse) {
+    const timings = { edge: Date.now() - edgeStart, d1: Date.now() - d1Start, total: Date.now() - totalStart };
+    console.log("PLP GET cache HIT", { cacheKeyUrl });
+    const cachedText = await cachedResponse.clone().text();
+    ctx.waitUntil(putEdgeCacheFromText(cacheKeyUrl, cachedText, cachedResponse.status, Object.fromEntries(cachedResponse.headers)));
+    const res = new Response(cachedResponse.body, cachedResponse);
+    res.headers.set("x-edge-cache", "HIT");
+    addCacheDebugHeaders(res, "d1", timings);
+    addCorsHeaders(res, env, request);
+    return res;
+  }
+  const timingsMiss = { edge: Date.now() - edgeStart, d1: Date.now() - d1Start, total: Date.now() - totalStart };
+  console.log("PLP GET cache MISS", { cacheKeyUrl });
 
   const incomingHeaders = request.headers;
   const backendHeaders: Record<string, string> = {
@@ -414,14 +512,16 @@ async function handleProductListRequest(
       status: backendResponse.status,
       headers: {
         "content-type": backendResponse.headers.get("content-type") || "application/json",
-        "cache-control": "public, max-age=31536000, stale-while-revalidate=31536000",
+        "cache-control": `public, max-age=${CACHE_TTL_SECONDS}, stale-while-revalidate=${CACHE_TTL_SECONDS}`,
       },
     });
 
     edgeResponse.headers.set("x-edge-cache", "MISS");
+    addCacheDebugHeaders(edgeResponse, "miss", timingsMiss);
     addCorsHeaders(edgeResponse, env, request);
 
-    ctx.waitUntil(cache.put(cacheKey, edgeResponse.clone()));
+    ctx.waitUntil(putSharedCacheFromText(env, cacheKeyUrl, textBody, edgeResponse.status, Object.fromEntries(edgeResponse.headers)));
+    ctx.waitUntil(putEdgeCacheFromText(cacheKeyUrl, textBody, edgeResponse.status, Object.fromEntries(edgeResponse.headers)));
     ctx.waitUntil(recordCacheMeta(env, "plp", cacheKeyUrl, { synced: false, source: "get" }));
 
     return edgeResponse;
@@ -437,7 +537,11 @@ async function handleProductListRequest(
 
 function addCorsHeaders(response: Response, env: Env, request: Request) {
   const origin = request.headers.get("origin");
-  if (origin && origin === env.ALLOWED_ORIGIN) {
+  const allowList = (env.ALLOWED_ORIGINS || env.ALLOWED_ORIGIN || "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (origin && allowList.includes(origin)) {
     response.headers.set("access-control-allow-origin", origin);
     response.headers.set("vary", "Origin");
   }
@@ -555,7 +659,7 @@ async function handleAdminRequest(request: Request, env: Env, ctx: ExecutionCont
       return jsonResponse({ error: "Not found" }, 404);
     }
 
-    const cacheResult = await getCachedResponse(meta.cacheKeyUrl);
+    const cacheResult = await getCachedResponse(env, meta.cacheKeyUrl);
     const freshResult = await getFreshResponseForMeta(env, meta);
 
     return jsonResponse({
@@ -816,6 +920,108 @@ function formatUaeNow(): string {
   return `${lookup.year}-${lookup.month}-${lookup.day}T${lookup.hour}:${lookup.minute}:${lookup.second}+04:00`;
 }
 
+async function getSharedCache(env: Env, cacheKeyUrl: string): Promise<Response | null> {
+  const result = await env.CACHE_DB.prepare(
+    "SELECT status, headers, body, expires_at FROM cache_entries WHERE cache_key = ?"
+  ).bind(cacheKeyUrl).first<{
+    status: number;
+    headers: string;
+    body: string;
+    expires_at: number;
+  }>();
+
+  if (!result) {
+    return null;
+  }
+
+  const now = Date.now();
+  if (result.expires_at && result.expires_at <= now) {
+    await deleteSharedCache(env, cacheKeyUrl);
+    return null;
+  }
+
+  const headersObj = safeJsonParse(result.headers) as Record<string, string> | null;
+  const headers = new Headers(headersObj || {});
+  headers.set("cache-control", `public, max-age=${CACHE_TTL_SECONDS}, stale-while-revalidate=${CACHE_TTL_SECONDS}`);
+
+  return new Response(result.body, {
+    status: result.status,
+    headers,
+  });
+}
+
+async function getEdgeCache(cacheKeyUrl: string): Promise<Response | null> {
+  const cacheKey = new Request(cacheKeyUrl, { method: "GET" });
+  const cachedResponse = await caches.default.match(cacheKey);
+  if (!cachedResponse) {
+    return null;
+  }
+  return cachedResponse;
+}
+
+async function putEdgeCacheFromText(
+  cacheKeyUrl: string,
+  body: string,
+  status: number,
+  headers: Record<string, string>
+): Promise<void> {
+  const cacheKey = new Request(cacheKeyUrl, { method: "GET" });
+  const cacheResponse = buildEdgeCacheResponse(body, status, headers);
+  await caches.default.put(cacheKey, cacheResponse);
+}
+
+function addCacheDebugHeaders(response: Response, layer: "edge" | "d1" | "miss", timings: Record<string, number>) {
+  response.headers.set("x-cache-layer", layer);
+  const parts: string[] = [];
+  if (Number.isFinite(timings.edge)) {
+    parts.push(`edge;dur=${timings.edge.toFixed(1)}`);
+  }
+  if (Number.isFinite(timings.d1)) {
+    parts.push(`d1;dur=${timings.d1.toFixed(1)}`);
+  }
+  if (Number.isFinite(timings.total)) {
+    parts.push(`total;dur=${timings.total.toFixed(1)}`);
+  }
+  if (parts.length) {
+    response.headers.set("server-timing", parts.join(", "));
+  }
+}
+
+async function putSharedCacheFromText(
+  env: Env,
+  cacheKeyUrl: string,
+  body: string,
+  status: number,
+  headers: Record<string, string>
+): Promise<void> {
+  const now = Date.now();
+  const expiresAt = now + CACHE_TTL_SECONDS * 1000;
+  await env.CACHE_DB.prepare(
+    `INSERT INTO cache_entries (cache_key, status, headers, body, created_at, updated_at, expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(cache_key) DO UPDATE SET
+       status = excluded.status,
+       headers = excluded.headers,
+       body = excluded.body,
+       updated_at = excluded.updated_at,
+       expires_at = excluded.expires_at`
+  ).bind(
+    cacheKeyUrl,
+    status,
+    JSON.stringify(headers),
+    body,
+    now,
+    now,
+    expiresAt
+  ).run();
+}
+
+async function deleteSharedCache(env: Env, cacheKeyUrl: string): Promise<void> {
+  await env.CACHE_DB.prepare("DELETE FROM cache_entries WHERE cache_key = ?")
+    .bind(cacheKeyUrl)
+    .run();
+}
+
 async function hashCacheKey(type: CacheType, cacheKeyUrl: string): Promise<string> {
   const encoder = new TextEncoder();
   const data = encoder.encode(`${type}:${cacheKeyUrl}`);
@@ -875,6 +1081,7 @@ async function clearCacheByType(
   const items = await listCacheMeta(env, type);
   let cleared = 0;
   for (const item of items) {
+    await deleteSharedCache(env, item.cacheKeyUrl);
     const cacheKey = new Request(item.cacheKeyUrl, { method: "GET" });
     await caches.default.delete(cacheKey);
     const metaKey = `${item.type}:${item.id}`;
@@ -893,9 +1100,8 @@ async function getCacheMeta(env: Env, id: string): Promise<CacheMeta | null> {
   return pdp || null;
 }
 
-async function getCachedResponse(cacheKeyUrl: string): Promise<unknown> {
-  const cacheKey = new Request(cacheKeyUrl, { method: "GET" });
-  const cachedResponse = await caches.default.match(cacheKey);
+async function getCachedResponse(env: Env, cacheKeyUrl: string): Promise<unknown> {
+  const cachedResponse = await getSharedCache(env, cacheKeyUrl);
   if (!cachedResponse) {
     return { hit: false };
   }
@@ -940,8 +1146,8 @@ async function syncCacheForMeta(env: Env, ctx: ExecutionContext, meta: CacheMeta
   if ("status" in (fresh as Record<string, unknown>) && (fresh as any).raw) {
     const responseInfo = fresh as { status: number; headers: Record<string, string>; raw: string };
     const cacheResponse = buildEdgeCacheResponse(responseInfo.raw, responseInfo.status, responseInfo.headers);
-    const cacheKey = new Request(meta.cacheKeyUrl, { method: "GET" });
-    await caches.default.put(cacheKey, cacheResponse);
+    await putSharedCacheFromText(env, meta.cacheKeyUrl, responseInfo.raw, cacheResponse.status, Object.fromEntries(cacheResponse.headers));
+    await putEdgeCacheFromText(meta.cacheKeyUrl, responseInfo.raw, cacheResponse.status, Object.fromEntries(cacheResponse.headers));
     await recordCacheMeta(env, meta.type, meta.cacheKeyUrl, {
       synced: true,
       source: meta.source,
@@ -1291,8 +1497,7 @@ async function runPrewarmBatch(
       };
 
       const baseCacheKeyUrl = buildPlpCacheKeyUrl(edgeOrigin, baseBody);
-      const baseCacheKey = new Request(baseCacheKeyUrl, { method: "GET" });
-      const cachedFirstPage = await caches.default.match(baseCacheKey);
+      const cachedFirstPage = await getEdgeCache(baseCacheKeyUrl) || await getSharedCache(env, baseCacheKeyUrl);
       if (cachedFirstPage) {
         advancePrewarmPointer(job);
         processedThisBatch += 1;
@@ -1343,9 +1548,9 @@ async function runPrewarmBatch(
       job.total += Math.max(job.lastPage, 1);
 
       const cacheKeyUrl = buildPlpCacheKeyUrl(edgeOrigin, baseBody);
-      const cacheKey = new Request(cacheKeyUrl, { method: "GET" });
       const cacheResponse = buildEdgeCacheResponse(firstBodyText, firstResponse.status, Object.fromEntries(firstResponse.headers));
-      await caches.default.put(cacheKey, cacheResponse);
+      await putSharedCacheFromText(env, cacheKeyUrl, firstBodyText, cacheResponse.status, Object.fromEntries(cacheResponse.headers));
+      await putEdgeCacheFromText(cacheKeyUrl, firstBodyText, cacheResponse.status, Object.fromEntries(cacheResponse.headers));
       await recordCacheMeta(env, "plp", cacheKeyUrl, { synced: false, source: "post" });
 
       job.processed += 1;
@@ -1395,9 +1600,9 @@ async function runPrewarmBatch(
       } else {
         const pageBodyText = await pageResponse.text();
         const pageCacheKeyUrl = buildPlpCacheKeyUrl(edgeOrigin, body);
-        const pageCacheKey = new Request(pageCacheKeyUrl, { method: "GET" });
         const pageCacheResponse = buildEdgeCacheResponse(pageBodyText, pageResponse.status, Object.fromEntries(pageResponse.headers));
-        await caches.default.put(pageCacheKey, pageCacheResponse);
+        await putSharedCacheFromText(env, pageCacheKeyUrl, pageBodyText, pageCacheResponse.status, Object.fromEntries(pageCacheResponse.headers));
+        await putEdgeCacheFromText(pageCacheKeyUrl, pageBodyText, pageCacheResponse.status, Object.fromEntries(pageCacheResponse.headers));
         await recordCacheMeta(env, "plp", pageCacheKeyUrl, { synced: false, source: "post" });
       }
 
@@ -1461,7 +1666,7 @@ function buildEdgeCacheResponse(
   if (!responseHeaders.get("content-type")) {
     responseHeaders.set("content-type", "application/json");
   }
-  responseHeaders.set("cache-control", "public, max-age=31536000, stale-while-revalidate=31536000");
+  responseHeaders.set("cache-control", `public, max-age=${CACHE_TTL_SECONDS}, stale-while-revalidate=${CACHE_TTL_SECONDS}`);
 
   return new Response(rawBody, {
     status,
@@ -1810,7 +2015,7 @@ function getAdminHtml(): string {
           return () => clearInterval(interval);
         }, [autoContinue, activeJobId]);
 
-        const ttlSeconds = 31536000;
+        const ttlSeconds = 604800;
         const formatUaeDate = (value) => {
           if (!value) return '-';
           const date = new Date(value);
@@ -1927,6 +2132,7 @@ function getAdminHtml(): string {
           e('div', { className: 'controls' },
             e('button', { onClick: () => load('all') }, 'Load All'),
             e('button', { className: 'secondary', onClick: () => syncAll() }, 'Sync All'),
+            e('button', { className: 'danger', onClick: () => clear('all') }, 'Clear All'),
             e('button', { className: 'secondary', onClick: () => setShowPrewarm(!showPrewarm) },
               showPrewarm ? 'Hide Prewarm' : 'Show Prewarm'
             ),
