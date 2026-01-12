@@ -76,18 +76,20 @@ export default {
       }
 
       // 3. 404 Not Found for unmatched routes
-      return new Response(JSON.stringify({ error: "Not found" }), {
+      const notFoundResponse = new Response(JSON.stringify({ error: "Not found" }), {
         status: 404,
         headers: { "Content-Type": "application/json" },
       });
+      return withCors(notFoundResponse, env, request);
 
     } catch (err: any) {
       // 4. Global Error Trap (Safety Net)
       console.error(`Unhandled Worker Error: ${err.message}`, err.stack);
-      return new Response(JSON.stringify({ error: "Internal Server Error" }), {
+      const errorResponse = new Response(JSON.stringify({ error: "Internal Server Error" }), {
         status: 500,
         headers: { "Content-Type": "application/json" },
       });
+      return withCors(errorResponse, env, request);
     }
   },
 };
@@ -121,7 +123,7 @@ export class VisitCounter {
  */
 function handleOptions(env: Env, request: Request): Response {
   const headers: Record<string, string> = {
-    "access-control-allow-methods": "GET, OPTIONS",
+    "access-control-allow-methods": "GET, POST, OPTIONS",
     "access-control-allow-headers": "Content-Type, X-FBC, X-FBP",
     "access-control-max-age": "86400",
   };
@@ -152,10 +154,11 @@ async function handleProductPostRequest(
   console.log("PDP POST request", { url: url.toString(), slug });
   const body = await parseJsonBody(request);
   if (!body) {
-    return new Response(JSON.stringify({ error: "Invalid JSON body" }), {
+    const invalidResponse = new Response(JSON.stringify({ error: "Invalid JSON body" }), {
       status: 400,
       headers: { "Content-Type": "application/json" },
     });
+    return withCors(invalidResponse, env, request);
   }
   const requestBodyHash = await hashRequestBody(body);
 
@@ -199,10 +202,11 @@ async function handleProductPostRequest(
     const backendResponse = await fetchPdpBackend(env, request, slug, region, language);
     if (!backendResponse.ok) {
       console.error(`Backend returned ${backendResponse.status} for slug: ${slug}`);
-      return new Response(backendResponse.body, {
+      const errorResponse = new Response(backendResponse.body, {
         status: backendResponse.status,
         headers: backendResponse.headers
       });
+      return withCors(errorResponse, env, request);
     }
 
     const textBody = await backendResponse.text();
@@ -229,10 +233,11 @@ async function handleProductPostRequest(
     return edgeResponse;
   } catch (error) {
     console.error(`Fetch failed for PDP ${slug}:`, error);
-    return new Response(JSON.stringify({ error: "Service Unavailable" }), {
+    const errorResponse = new Response(JSON.stringify({ error: "Service Unavailable" }), {
       status: 502,
       headers: { "Content-Type": "application/json" }
     });
+    return withCors(errorResponse, env, request);
   }
 }
 
@@ -245,10 +250,11 @@ async function handleProductListPostRequest(
   console.log("PLP POST request", { url: url.toString() });
   const body = await parseJsonBody(request);
   if (!body) {
-    return new Response(JSON.stringify({ error: "Invalid JSON body" }), {
+    const invalidResponse = new Response(JSON.stringify({ error: "Invalid JSON body" }), {
       status: 400,
       headers: { "Content-Type": "application/json" },
     });
+    return withCors(invalidResponse, env, request);
   }
   const requestBodyHash = await hashRequestBody(body);
 
@@ -304,10 +310,11 @@ async function handleProductListPostRequest(
     });
     if (!backendResponse.ok) {
       console.error(`Backend list returned ${backendResponse.status}`);
-      return new Response(backendResponse.body, {
+      const errorResponse = new Response(backendResponse.body, {
         status: backendResponse.status,
         headers: backendResponse.headers
       });
+      return withCors(errorResponse, env, request);
     }
 
     const textBody = await backendResponse.text();
@@ -334,10 +341,11 @@ async function handleProductListPostRequest(
     return edgeResponse;
   } catch (error) {
     console.error(`Fetch failed for PLP:`, error);
-    return new Response(JSON.stringify({ error: "Service Unavailable" }), {
+    const errorResponse = new Response(JSON.stringify({ error: "Service Unavailable" }), {
       status: 502,
       headers: { "Content-Type": "application/json" }
     });
+    return withCors(errorResponse, env, request);
   }
 }
 
@@ -401,10 +409,11 @@ async function handleProductRequest(
     if (!backendResponse.ok) {
         console.error(`Backend returned ${backendResponse.status} for slug: ${slug}`);
         // We clone here because we might read the body or pass it through
-        return new Response(backendResponse.body, {
+        const errorResponse = new Response(backendResponse.body, {
             status: backendResponse.status,
             headers: backendResponse.headers
         });
+        return withCors(errorResponse, env, request);
     }
 
     const textBody = await backendResponse.text();
@@ -430,10 +439,11 @@ async function handleProductRequest(
 
   } catch (error) {
     console.error(`Fetch failed for PDP ${slug}:`, error);
-    return new Response(JSON.stringify({ error: "Service Unavailable" }), {
+    const errorResponse = new Response(JSON.stringify({ error: "Service Unavailable" }), {
         status: 502,
         headers: { "Content-Type": "application/json" }
     });
+    return withCors(errorResponse, env, request);
   }
 }
 
@@ -500,10 +510,11 @@ async function handleProductListRequest(
 
     if (!backendResponse.ok) {
         console.error(`Backend list returned ${backendResponse.status}`);
-        return new Response(backendResponse.body, {
+        const errorResponse = new Response(backendResponse.body, {
             status: backendResponse.status,
             headers: backendResponse.headers
         });
+        return withCors(errorResponse, env, request);
     }
 
     const textBody = await backendResponse.text();
@@ -528,10 +539,11 @@ async function handleProductListRequest(
 
   } catch (error) {
     console.error(`Fetch failed for PLP:`, error);
-    return new Response(JSON.stringify({ error: "Service Unavailable" }), {
+    const errorResponse = new Response(JSON.stringify({ error: "Service Unavailable" }), {
         status: 502,
         headers: { "Content-Type": "application/json" }
     });
+    return withCors(errorResponse, env, request);
   }
 }
 
@@ -546,6 +558,11 @@ function addCorsHeaders(response: Response, env: Env, request: Request) {
     response.headers.set("vary", "Origin");
   }
   response.headers.set("access-control-allow-credentials", "true");
+}
+
+function withCors(response: Response, env: Env, request: Request): Response {
+  addCorsHeaders(response, env, request);
+  return response;
 }
 
 type CacheType = "plp" | "pdp";
@@ -582,6 +599,25 @@ interface PrewarmJob {
   start: number;
   limit: number;
   category?: string | null;
+  message?: string | null;
+}
+
+interface CacheSyncJob {
+  id: string;
+  status: "running" | "completed" | "failed";
+  startedAt: string;
+  finishedAt?: string | null;
+  type: CacheType | "all";
+  prefixes: string[];
+  prefixIndex: number;
+  cursor: string | null;
+  total: number;
+  processed: number;
+  synced: number;
+  failed: number;
+  batchLimit: number;
+  lastBatchMs?: number | null;
+  totalBatchMs?: number;
   message?: string | null;
 }
 
@@ -641,12 +677,47 @@ async function handleAdminRequest(request: Request, env: Env, ctx: ExecutionCont
 
   if (pathname === "/admin/cache" && request.method === "GET") {
     const type = (url.searchParams.get("type") || "all").toLowerCase();
-    const list = await listCacheMeta(env, type === "all" ? null : (type as CacheType));
-    const items = await Promise.all(list.map(async (item) => {
-      const visits = await getVisitCount(env, item.type, item.cacheKeyUrl);
-      return { ...item, visits };
-    }));
-    return jsonResponse({ items }, 200);
+    const limitParam = url.searchParams.get("limit");
+    const cursorParam = url.searchParams.get("cursor");
+    const limit = limitParam ? Math.max(1, Math.min(1000, parseInt(limitParam, 10))) : null;
+    const cursor = cursorParam || null;
+    const includeVisits = url.searchParams.get("visits") === "1";
+
+    let items: CacheMeta[] = [];
+    let nextCursor: string | null = null;
+    if (limit || cursor) {
+      const page = await listCacheMetaPaginated(
+        env,
+        type === "all" ? null : (type as CacheType),
+        limit ?? 100,
+        cursor
+      );
+      items = page.items;
+      nextCursor = page.nextCursor;
+    } else {
+      items = await listCacheMeta(env, type === "all" ? null : (type as CacheType));
+    }
+
+    if (includeVisits) {
+      items = await Promise.all(items.map(async (item) => {
+        const visits = await getVisitCount(env, item.type, item.cacheKeyUrl);
+        return { ...item, visits };
+      }));
+    }
+
+    return jsonResponse({ items, nextCursor }, 200);
+  }
+
+  if (pathname === "/admin/cache/stats" && request.method === "GET") {
+    const type = (url.searchParams.get("type") || "all").toLowerCase();
+    if (type === "all") {
+      const plp = await countCacheKeysForPrefix(env, "plp:");
+      const pdp = await countCacheKeysForPrefix(env, "pdp:");
+      return jsonResponse({ total: plp + pdp, plp, pdp }, 200);
+    }
+    const prefix = type === "pdp" ? "pdp:" : "plp:";
+    const total = await countCacheKeysForPrefix(env, prefix);
+    return jsonResponse({ total }, 200);
   }
 
   if (pathname === "/admin/cache/item" && request.method === "GET") {
@@ -685,9 +756,62 @@ async function handleAdminRequest(request: Request, env: Env, ctx: ExecutionCont
 
   if (pathname === "/admin/cache/sync-all" && request.method === "POST") {
     const type = (url.searchParams.get("type") || "all").toLowerCase();
-    const syncPromise = syncAllCache(env, ctx, type === "all" ? null : (type as CacheType));
-    ctx.waitUntil(syncPromise);
-    return jsonResponse({ status: "started" }, 202);
+    const limitParam = url.searchParams.get("limit");
+    const batchLimit = limitParam ? Math.max(1, Math.min(200, parseInt(limitParam, 10))) : 10;
+    const job = await createCacheSyncJob(env, type === "all" ? "all" : (type as CacheType), batchLimit);
+    const runPromise = runCacheSyncBatch(env, ctx, job.id);
+    ctx.waitUntil(runPromise);
+    return jsonResponse({ status: "started", jobId: job.id }, 202);
+  }
+
+  if (pathname === "/admin/cache/sync/status" && request.method === "GET") {
+    const id = url.searchParams.get("id");
+    if (!id) {
+      return jsonResponse({ error: "Missing id" }, 400);
+    }
+    const job = await getCacheSyncJob(env, id);
+    if (!job) {
+      return jsonResponse({ error: "Not found" }, 404);
+    }
+    return jsonResponse(job, 200);
+  }
+
+  if (pathname === "/admin/cache/sync/latest" && request.method === "GET") {
+    const job = await getLatestCacheSyncJob(env);
+    if (!job) {
+      return jsonResponse({ error: "Not found" }, 404);
+    }
+    return jsonResponse(job, 200);
+  }
+
+  if (pathname === "/admin/cache/sync/continue" && request.method === "POST") {
+    const id = url.searchParams.get("id");
+    if (!id) {
+      return jsonResponse({ error: "Missing id" }, 400);
+    }
+    const job = await runCacheSyncBatch(env, ctx, id);
+    if (!job) {
+      return jsonResponse({ error: "Not found" }, 404);
+    }
+    return jsonResponse(job, 200);
+  }
+
+  if (pathname === "/admin/cache/sync/stop" && request.method === "POST") {
+    const id = url.searchParams.get("id");
+    if (!id) {
+      return jsonResponse({ error: "Missing id" }, 400);
+    }
+    const job = await getCacheSyncJob(env, id);
+    if (!job) {
+      return jsonResponse({ error: "Not found" }, 404);
+    }
+    if (job.status === "running") {
+      job.status = "failed";
+      job.finishedAt = formatUaeNow();
+      job.message = "Stopped by admin";
+      await updateCacheSyncJob(env, job);
+    }
+    return jsonResponse(job, 200);
   }
 
   if (pathname === "/admin/cache/clear" && request.method === "POST") {
@@ -1073,6 +1197,44 @@ async function listCacheMeta(env: Env, type: CacheType | null): Promise<CacheMet
   return items;
 }
 
+async function countCacheKeysForPrefix(env: Env, prefix: string): Promise<number> {
+  let total = 0;
+  let cursor: string | undefined = undefined;
+  do {
+    const listResult = await env.CACHE_META.list({ prefix, limit: 1000, cursor });
+    total += listResult.keys.length;
+    cursor = listResult.list_complete ? undefined : listResult.cursor;
+  } while (cursor);
+  return total;
+}
+
+async function listCacheMetaPaginated(
+  env: Env,
+  type: CacheType | null,
+  limit: number,
+  cursor: string | null
+): Promise<{ items: CacheMeta[]; nextCursor: string | null }> {
+  const prefix = type ? `${type}:` : undefined;
+  const listResult = await env.CACHE_META.list({
+    prefix,
+    limit,
+    cursor: cursor || undefined,
+  });
+  const items: CacheMeta[] = [];
+
+  for (const key of listResult.keys) {
+    const value = await env.CACHE_META.get(key.name, "json") as CacheMeta | null;
+    if (value && value.cacheKeyUrl) {
+      items.push(value);
+    }
+  }
+
+  return {
+    items,
+    nextCursor: listResult.list_complete ? null : listResult.cursor,
+  };
+}
+
 async function clearCacheByType(
   env: Env,
   ctx: ExecutionContext,
@@ -1174,6 +1336,127 @@ async function syncAllCache(
     }
   }
   return { total: items.length, synced, failed };
+}
+
+function getCacheSyncKey(id: string): string {
+  return `cache-sync:${id}`;
+}
+
+function getCacheSyncLatestKey(): string {
+  return "cache-sync:latest";
+}
+
+async function createCacheSyncJob(
+  env: Env,
+  type: CacheType | "all",
+  batchLimit: number
+): Promise<CacheSyncJob> {
+  const id = crypto.randomUUID();
+  const prefixes = type === "all" ? ["plp:", "pdp:"] : [`${type}:`];
+  let total = 0;
+  for (const prefix of prefixes) {
+    total += await countCacheKeysForPrefix(env, prefix);
+  }
+  const job: CacheSyncJob = {
+    id,
+    status: "running",
+    startedAt: formatUaeNow(),
+    finishedAt: null,
+    type,
+    prefixes,
+    prefixIndex: 0,
+    cursor: null,
+    total,
+    processed: 0,
+    synced: 0,
+    failed: 0,
+    batchLimit,
+    lastBatchMs: null,
+    totalBatchMs: 0,
+  };
+  await kvPutWithRetry(env, getCacheSyncKey(id), JSON.stringify(job));
+  await kvPutWithRetry(env, getCacheSyncLatestKey(), id);
+  return job;
+}
+
+async function getCacheSyncJob(env: Env, id: string): Promise<CacheSyncJob | null> {
+  return await env.CACHE_META.get(getCacheSyncKey(id), "json") as CacheSyncJob | null;
+}
+
+async function getLatestCacheSyncJob(env: Env): Promise<CacheSyncJob | null> {
+  const id = await env.CACHE_META.get(getCacheSyncLatestKey());
+  if (!id) {
+    return null;
+  }
+  return await getCacheSyncJob(env, id);
+}
+
+async function updateCacheSyncJob(env: Env, job: CacheSyncJob): Promise<void> {
+  await kvPutWithRetry(env, getCacheSyncKey(job.id), JSON.stringify(job));
+}
+
+async function runCacheSyncBatch(
+  env: Env,
+  ctx: ExecutionContext,
+  id: string
+): Promise<CacheSyncJob | null> {
+  const job = await getCacheSyncJob(env, id);
+  if (!job) {
+    return null;
+  }
+  if (job.status !== "running") {
+    return job;
+  }
+
+  if (job.prefixIndex >= job.prefixes.length) {
+    job.status = "completed";
+    job.finishedAt = formatUaeNow();
+    await updateCacheSyncJob(env, job);
+    return job;
+  }
+
+  const prefix = job.prefixes[job.prefixIndex];
+  const batchStart = Date.now();
+  const listResult = await env.CACHE_META.list({
+    prefix,
+    limit: job.batchLimit,
+    cursor: job.cursor || undefined,
+  });
+
+  for (const key of listResult.keys) {
+    try {
+      const value = await env.CACHE_META.get(key.name, "json") as CacheMeta | null;
+      if (value && value.cacheKeyUrl) {
+        await syncCacheForMeta(env, ctx, value);
+        job.synced += 1;
+      } else {
+        job.failed += 1;
+      }
+    } catch {
+      job.failed += 1;
+    } finally {
+      job.processed += 1;
+    }
+  }
+
+  if (listResult.list_complete) {
+    job.prefixIndex += 1;
+    job.cursor = null;
+  } else {
+    job.cursor = listResult.cursor;
+  }
+
+  if (job.prefixIndex >= job.prefixes.length && job.cursor === null) {
+    job.status = "completed";
+    job.finishedAt = formatUaeNow();
+  }
+
+  const batchMs = Date.now() - batchStart;
+  job.lastBatchMs = batchMs;
+  job.totalBatchMs = (job.totalBatchMs || 0) + batchMs;
+
+  await updateCacheSyncJob(env, job);
+  return job;
 }
 
 function buildPlpBodyFromUrl(url: URL): Record<string, unknown> {
@@ -1893,31 +2176,83 @@ function getAdminHtml(): string {
         const [filterRegion, setFilterRegion] = React.useState('');
         const [filterCategory, setFilterCategory] = React.useState('');
         const [searchTerm, setSearchTerm] = React.useState('');
+        const [cacheType, setCacheType] = React.useState('all');
+        const [pageLimit, setPageLimit] = React.useState('100');
+        const [nextCursor, setNextCursor] = React.useState('');
+        const [cursorHistory, setCursorHistory] = React.useState(['']);
+        const [pageIndex, setPageIndex] = React.useState(1);
+        const [cacheStats, setCacheStats] = React.useState({ total: 0, plp: 0, pdp: 0 });
+        const [cacheSyncJob, setCacheSyncJob] = React.useState(null);
+        const [cacheSyncAuto, setCacheSyncAuto] = React.useState(true);
+        const [cacheSyncLimit, setCacheSyncLimit] = React.useState('10');
+        const [cacheSyncTotalMs, setCacheSyncTotalMs] = React.useState(0);
 
-        const load = async (type) => {
+        const loadCache = async (type, cursor, options = { reset: false }) => {
           setLoading(true);
           setError('');
           try {
-            const res = await fetch('/admin/cache?type=' + type, { credentials: 'same-origin' });
+            const params = new URLSearchParams();
+            const parsedLimit = parseInt(pageLimit, 10);
+            const safeLimit = Number.isFinite(parsedLimit) ? String(parsedLimit) : '100';
+            params.set('type', type);
+            params.set('limit', safeLimit);
+            if (cursor) params.set('cursor', cursor);
+            const res = await fetch('/admin/cache?' + params.toString(), { credentials: 'same-origin' });
             const data = await res.json();
             setItems(data.items || []);
             setSelected(null);
+            setNextCursor(data.nextCursor || '');
+            if (options.reset) {
+              setCursorHistory([cursor || '']);
+              setPageIndex(1);
+            }
           } catch (err) {
             setError('Failed to load cache list.');
           } finally {
             setLoading(false);
           }
         };
+        const load = async (type) => {
+          setCacheType(type);
+          await loadCache(type, '', { reset: true });
+        };
+        const loadFirstPage = async () => {
+          await loadCache(cacheType, '', { reset: true });
+        };
+        const loadNextPage = async () => {
+          if (!nextCursor) return;
+          const cursor = nextCursor;
+          setCursorHistory((prev) => [...prev, cursor]);
+          setPageIndex((prev) => prev + 1);
+          await loadCache(cacheType, cursor);
+        };
+        const loadPrevPage = async () => {
+          if (cursorHistory.length <= 1) return;
+          const history = cursorHistory.slice(0, -1);
+          const cursor = history[history.length - 1];
+          setCursorHistory(history);
+          setPageIndex((prev) => Math.max(1, prev - 1));
+          await loadCache(cacheType, cursor);
+        };
         const syncAll = async () => {
           setLoading(true);
           setError('');
           try {
-            const res = await fetch('/admin/cache/sync-all', { method: 'POST', credentials: 'same-origin' });
-            if (!res.ok) {
-              setError('Failed to sync all cache.');
+            const params = new URLSearchParams();
+            params.set('type', cacheType);
+            const parsedLimit = parseInt(cacheSyncLimit, 10);
+            const safeLimit = Number.isFinite(parsedLimit) ? String(parsedLimit) : '10';
+            params.set('limit', safeLimit);
+            const res = await fetch('/admin/cache/sync-all?' + params.toString(), { method: 'POST', credentials: 'same-origin' });
+            const data = await res.json();
+            if (data && data.jobId) {
+              setCacheSyncJob({ id: data.jobId });
+              setCacheSyncAuto(true);
+            } else if (!res.ok) {
+              setError('Failed to start sync job.');
             }
           } catch {
-            setError('Failed to sync all cache.');
+            setError('Failed to start sync job.');
           } finally {
             setLoading(false);
           }
@@ -1939,6 +2274,47 @@ function getAdminHtml(): string {
           } catch {
             setCategories([]);
           }
+        };
+
+        const loadCacheStats = async () => {
+          try {
+            const res = await fetch('/admin/cache/stats?type=all', { credentials: 'same-origin' });
+            const data = await res.json();
+            setCacheStats({
+              total: data.total || 0,
+              plp: data.plp || 0,
+              pdp: data.pdp || 0
+            });
+          } catch {
+            setCacheStats({ total: 0, plp: 0, pdp: 0 });
+          }
+        };
+
+        const loadCacheSyncStatus = async (jobId) => {
+          if (!jobId) return null;
+          const res = await fetch('/admin/cache/sync/status?id=' + jobId, { credentials: 'same-origin' });
+          if (!res.ok) return null;
+          return await res.json();
+        };
+
+        const loadLatestCacheSync = async () => {
+          const res = await fetch('/admin/cache/sync/latest', { credentials: 'same-origin' });
+          if (!res.ok) return null;
+          return await res.json();
+        };
+
+        const continueCacheSync = async (jobId) => {
+          if (!jobId) return null;
+          const res = await fetch('/admin/cache/sync/continue?id=' + jobId, { method: 'POST', credentials: 'same-origin' });
+          if (!res.ok) return null;
+          return await res.json();
+        };
+
+        const stopCacheSync = async (jobId) => {
+          if (!jobId) return null;
+          const res = await fetch('/admin/cache/sync/stop?id=' + jobId, { method: 'POST', credentials: 'same-origin' });
+          if (!res.ok) return null;
+          return await res.json();
         };
 
         const startPrewarm = async () => {
@@ -1980,7 +2356,7 @@ function getAdminHtml(): string {
         const clear = async (type) => {
           const res = await fetch('/admin/cache/clear?type=' + type, { method: 'POST', credentials: 'same-origin' });
           await res.json();
-          await load('all');
+          await loadFirstPage();
         };
 
         const view = async (id) => {
@@ -1994,13 +2370,26 @@ function getAdminHtml(): string {
           const res = await fetch('/admin/cache/sync?id=' + id, { method: 'POST', credentials: 'same-origin' });
           const data = await res.json();
           setSelected((prev) => ({ ...prev, fresh: data }));
-          await load('all');
+          await loadFirstPage();
         };
 
         React.useEffect(() => {
-          load('all');
+          loadFirstPage();
           loadPrewarm();
           loadCategories();
+          loadCacheStats();
+          (async () => {
+            const latest = await loadLatestCacheSync();
+            if (latest) {
+              setCacheSyncJob(latest);
+              if (latest.status === 'running') {
+                setCacheSyncAuto(true);
+              }
+              if (typeof latest.totalBatchMs === 'number') {
+                setCacheSyncTotalMs(latest.totalBatchMs);
+              }
+            }
+          })();
         }, []);
 
         React.useEffect(() => {
@@ -2014,6 +2403,26 @@ function getAdminHtml(): string {
           }, 5000);
           return () => clearInterval(interval);
         }, [autoContinue, activeJobId]);
+
+        React.useEffect(() => {
+          if (!cacheSyncAuto || !cacheSyncJob || !cacheSyncJob.id) return;
+          const interval = setInterval(async () => {
+            const progressed = await continueCacheSync(cacheSyncJob.id);
+            if (progressed) {
+              setCacheSyncJob(progressed);
+              if (typeof progressed.totalBatchMs === 'number') {
+                setCacheSyncTotalMs(progressed.totalBatchMs);
+              }
+            }
+            const current = progressed || (await loadCacheSyncStatus(cacheSyncJob.id));
+            if (!current || current.status !== 'running') {
+              setCacheSyncAuto(false);
+              await loadCacheStats();
+              await loadFirstPage();
+            }
+          }, 30000);
+          return () => clearInterval(interval);
+        }, [cacheSyncAuto, cacheSyncJob && cacheSyncJob.id]);
 
         const ttlSeconds = 604800;
         const formatUaeDate = (value) => {
@@ -2130,7 +2539,28 @@ function getAdminHtml(): string {
         return e('div', null,
           e('h1', null, 'Edge Cache Admin'),
           e('div', { className: 'controls' },
-            e('button', { onClick: () => load('all') }, 'Load All'),
+            e('select', {
+              value: cacheType,
+              onChange: (e) => setCacheType(e.target.value),
+              style: { padding: '8px', borderRadius: '8px', border: '1px solid #e5e7eb' }
+            },
+              e('option', { value: 'all' }, 'All types'),
+              e('option', { value: 'pdp' }, 'PDP'),
+              e('option', { value: 'plp' }, 'PLP')
+            ),
+            e('input', {
+              value: pageLimit,
+              onChange: (e) => setPageLimit(e.target.value),
+              placeholder: 'page size',
+              style: { padding: '8px', borderRadius: '8px', border: '1px solid #e5e7eb', width: '110px' }
+            }),
+            e('button', { onClick: () => loadFirstPage() }, 'Load'),
+            e('input', {
+              value: cacheSyncLimit,
+              onChange: (e) => setCacheSyncLimit(e.target.value),
+              placeholder: 'sync batch',
+              style: { padding: '8px', borderRadius: '8px', border: '1px solid #e5e7eb', width: '110px' }
+            }),
             e('button', { className: 'secondary', onClick: () => syncAll() }, 'Sync All'),
             e('button', { className: 'danger', onClick: () => clear('all') }, 'Clear All'),
             e('button', { className: 'secondary', onClick: () => setShowPrewarm(!showPrewarm) },
@@ -2139,6 +2569,37 @@ function getAdminHtml(): string {
             loading ? e('span', { style: { marginLeft: '8px' } }, 'Loading...') : null,
             error ? e('span', { style: { marginLeft: '8px', color: '#b91c1c' } }, error) : null
           ),
+          e('div', { className: 'meta', style: { marginBottom: '12px' } },
+            'Total cache entries: ', cacheStats.total,
+            ' | PDP: ', cacheStats.pdp,
+            ' | PLP: ', cacheStats.plp
+          ),
+          cacheSyncJob ? e('div', { className: 'panel', style: { marginBottom: '16px' } },
+            e('div', { className: 'item-title' }, 'Cache Sync Job'),
+            e('div', { className: 'meta' },
+              'Status: ', cacheSyncJob.status || '-',
+              ' | Processed: ', cacheSyncJob.processed || 0, '/', cacheSyncJob.total || 0,
+              ' | Synced: ', cacheSyncJob.synced || 0,
+              ' | Failed: ', cacheSyncJob.failed || 0,
+              ' | Left: ', Math.max(0, (cacheSyncJob.total || 0) - (cacheSyncJob.processed || 0)),
+              ' | Last batch: ', cacheSyncJob.lastBatchMs ? cacheSyncJob.lastBatchMs + 'ms' : '-',
+              ' | Total: ', cacheSyncTotalMs ? cacheSyncTotalMs + 'ms' : '-'
+            ),
+            cacheSyncJob.status === 'running'
+              ? e('div', { className: 'controls' },
+                e('button', {
+                  className: 'danger',
+                  onClick: async () => {
+                    const stopped = await stopCacheSync(cacheSyncJob.id);
+                    if (stopped) {
+                      setCacheSyncJob(stopped);
+                      setCacheSyncAuto(false);
+                    }
+                  }
+                }, 'Stop Sync')
+              )
+              : null
+          ) : null,
           showPrewarm ? e('div', { className: 'panel', style: { marginBottom: '16px' } },
             e('div', { className: 'controls' },
               e('input', {
@@ -2228,6 +2689,11 @@ function getAdminHtml(): string {
                   e('option', { key: cat.value, value: cat.value }, (cat.name || cat.value))
                 )
               )
+            ),
+            e('div', { className: 'controls' },
+              e('button', { className: 'secondary', onClick: () => loadPrevPage(), disabled: cursorHistory.length <= 1 }, 'Prev'),
+              e('button', { className: 'secondary', onClick: () => loadNextPage(), disabled: !nextCursor }, 'Next'),
+              e('span', { className: 'meta' }, 'Page ', pageIndex)
             ),
             e('div', { className: 'table-wrap' },
               e('table', null,
