@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy"
+    "deploy": "wrangler deploy",
+    "prewarm:decor": "node scripts/prewarm-decor.mjs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20241112.0",

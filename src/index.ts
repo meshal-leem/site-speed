@@ -33,6 +33,14 @@ export default {
         return jsonResponse({ status: "started" }, 202);
       }
 
+      if (url.pathname === "/webhook/vtex" && request.method === "POST") {
+        const authError = requireWebhookAuth(request, env);
+        if (authError) {
+          return authError;
+        }
+        return await handleVtexWebhook(request, env, ctx);
+      }
+
       if (url.pathname.startsWith("/admin")) {
         const authError = requireAdminAuth(request, env);
         if (authError) {
@@ -616,6 +624,7 @@ interface CacheSyncJob {
   synced: number;
   failed: number;
   batchLimit: number;
+  concurrency: number;
   lastBatchMs?: number | null;
   totalBatchMs?: number;
   message?: string | null;
@@ -662,6 +671,166 @@ function requireWebhookAuth(request: Request, env: Env): Response | null {
   return null;
 }
 
+type WebhookPdpItem = {
+  slug: string;
+  region?: string;
+  regions?: string[];
+  language?: string;
+  languages?: string[];
+  body?: unknown;
+  status?: number;
+  headers?: Record<string, string>;
+};
+
+type WebhookPlpItem = {
+  category: string;
+  collection?: string;
+  region?: string;
+  regions?: string[];
+  language?: string;
+  languages?: string[];
+  page?: number;
+  count?: number;
+  order?: string;
+  filters?: unknown[];
+  calculateTotalPrice?: boolean;
+  body?: unknown;
+  status?: number;
+  headers?: Record<string, string>;
+};
+
+function normalizeWebhookRegions(itemRegion?: string, itemRegions?: string[]): string[] {
+  if (Array.isArray(itemRegions) && itemRegions.length > 0) {
+    return itemRegions.map((value) => value.toLowerCase());
+  }
+  if (itemRegion) {
+    return [itemRegion.toLowerCase()];
+  }
+  return ["sa"];
+}
+
+function normalizeWebhookLanguages(itemLanguage?: string, itemLanguages?: string[]): string[] {
+  if (Array.isArray(itemLanguages) && itemLanguages.length > 0) {
+    return itemLanguages.map((value) => value.toLowerCase());
+  }
+  if (itemLanguage) {
+    return [itemLanguage.toLowerCase()];
+  }
+  return ["en"];
+}
+
+function buildWebhookCacheBody(body: unknown): string {
+  if (typeof body === "string") {
+    return body;
+  }
+  return JSON.stringify(body ?? null);
+}
+
+function buildWebhookCacheHeaders(headers?: Record<string, string>): Record<string, string> {
+  const normalized: Record<string, string> = {
+    "content-type": "application/json",
+  };
+  if (headers && typeof headers === "object") {
+    for (const [key, value] of Object.entries(headers)) {
+      normalized[key.toLowerCase()] = value;
+    }
+  }
+  return normalized;
+}
+
+async function handleVtexWebhook(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const payload = await parseJsonBody(request);
+  if (!payload) {
+    return jsonResponse({ error: "Invalid JSON body" }, 400);
+  }
+
+  const pdpItems = Array.isArray(payload.pdp) ? payload.pdp as WebhookPdpItem[] : [];
+  const plpItems = Array.isArray(payload.plp) ? payload.plp as WebhookPlpItem[] : [];
+  const origin = new URL(request.url).origin;
+
+  let processed = 0;
+  let synced = 0;
+  let failed = 0;
+  const errors: { type: string; message: string; item: string }[] = [];
+
+  for (const item of pdpItems) {
+    processed += 1;
+    if (!item || !item.slug) {
+      failed += 1;
+      errors.push({ type: "pdp", message: "Missing slug", item: "" });
+      continue;
+    }
+    if (item.body === undefined) {
+      failed += 1;
+      errors.push({ type: "pdp", message: "Missing body", item: item.slug });
+      continue;
+    }
+    const regions = normalizeWebhookRegions(item.region, item.regions);
+    const languages = normalizeWebhookLanguages(item.language, item.languages);
+    for (const region of regions) {
+      for (const language of languages) {
+        const cacheKeyUrl = `${origin}/products/${encodeURIComponent(item.slug)}?region=${region}&language=${language}`;
+        const rawBody = buildWebhookCacheBody(item.body);
+        const headers = buildWebhookCacheHeaders(item.headers);
+        const status = typeof item.status === "number" ? item.status : 200;
+        await putSharedCacheFromText(env, cacheKeyUrl, rawBody, status, headers);
+        await putEdgeCacheFromText(cacheKeyUrl, rawBody, status, headers);
+        await recordCacheMeta(env, "pdp", cacheKeyUrl, {
+          synced: true,
+          source: "post",
+          requestBodyHash: null,
+        });
+        synced += 1;
+      }
+    }
+  }
+
+  for (const item of plpItems) {
+    processed += 1;
+    if (!item || !item.category) {
+      failed += 1;
+      errors.push({ type: "plp", message: "Missing category", item: "" });
+      continue;
+    }
+    if (item.body === undefined) {
+      failed += 1;
+      errors.push({ type: "plp", message: "Missing body", item: item.category });
+      continue;
+    }
+    const regions = normalizeWebhookRegions(item.region, item.regions);
+    const languages = normalizeWebhookLanguages(item.language, item.languages);
+    for (const region of regions) {
+      for (const language of languages) {
+        const plpBody = normalizePlpBody({
+          page: item.page ?? 1,
+          count: item.count ?? 24,
+          category: item.category,
+          region,
+          language,
+          order: item.order ?? "OrderByScoreDESC",
+          collection: item.collection,
+          filters: item.filters ?? [],
+          calculateTotalPrice: item.calculateTotalPrice === true,
+        });
+        const cacheKeyUrl = buildPlpCacheKeyUrl(origin, plpBody);
+        const rawBody = buildWebhookCacheBody(item.body);
+        const headers = buildWebhookCacheHeaders(item.headers);
+        const status = typeof item.status === "number" ? item.status : 200;
+        await putSharedCacheFromText(env, cacheKeyUrl, rawBody, status, headers);
+        await putEdgeCacheFromText(cacheKeyUrl, rawBody, status, headers);
+        await recordCacheMeta(env, "plp", cacheKeyUrl, {
+          synced: true,
+          source: "post",
+          requestBodyHash: null,
+        });
+        synced += 1;
+      }
+    }
+  }
+
+  return jsonResponse({ status: "ok", processed, synced, failed, errors }, 200);
+}
+
 async function handleAdminRequest(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const url = new URL(request.url);
   const pathname = url.pathname;
@@ -706,6 +875,48 @@ async function handleAdminRequest(request: Request, env: Env, ctx: ExecutionCont
     }
 
     return jsonResponse({ items, nextCursor }, 200);
+  }
+
+  if (pathname === "/admin/cache/search" && request.method === "GET") {
+    const type = (url.searchParams.get("type") || "all").toLowerCase();
+    const limitParam = url.searchParams.get("limit");
+    const limit = limitParam ? Math.max(1, Math.min(200, parseInt(limitParam, 10))) : 50;
+    const queryRaw = url.searchParams.get("query") || url.searchParams.get("q") || "";
+    const query = queryRaw.trim().toLowerCase();
+    const includeVisits = url.searchParams.get("visits") === "1";
+    const sync = url.searchParams.get("sync") === "1";
+
+    if (!query) {
+      return jsonResponse({ error: "Missing query" }, 400);
+    }
+
+    let items = await listCacheMeta(env, type === "all" ? null : (type as CacheType));
+    items = items.filter((item) => item.cacheKeyUrl.toLowerCase().includes(query));
+    if (limit) {
+      items = items.slice(0, limit);
+    }
+
+    if (includeVisits) {
+      items = await Promise.all(items.map(async (item) => {
+        const visits = await getVisitCount(env, item.type, item.cacheKeyUrl);
+        return { ...item, visits };
+      }));
+    }
+
+    let synced = 0;
+    let failed = 0;
+    if (sync) {
+      for (const item of items) {
+        try {
+          await syncCacheForMeta(env, ctx, item);
+          synced += 1;
+        } catch {
+          failed += 1;
+        }
+      }
+    }
+
+    return jsonResponse({ items, synced, failed }, 200);
   }
 
   if (pathname === "/admin/cache/stats" && request.method === "GET") {
@@ -758,7 +969,9 @@ async function handleAdminRequest(request: Request, env: Env, ctx: ExecutionCont
     const type = (url.searchParams.get("type") || "all").toLowerCase();
     const limitParam = url.searchParams.get("limit");
     const batchLimit = limitParam ? Math.max(1, Math.min(200, parseInt(limitParam, 10))) : 10;
-    const job = await createCacheSyncJob(env, type === "all" ? "all" : (type as CacheType), batchLimit);
+    const concurrencyParam = url.searchParams.get("concurrency");
+    const concurrency = concurrencyParam ? Math.max(1, Math.min(20, parseInt(concurrencyParam, 10))) : 5;
+    const job = await createCacheSyncJob(env, type === "all" ? "all" : (type as CacheType), batchLimit, concurrency);
     const runPromise = runCacheSyncBatch(env, ctx, job.id);
     ctx.waitUntil(runPromise);
     return jsonResponse({ status: "started", jobId: job.id }, 202);
@@ -1186,9 +1399,13 @@ async function listCacheMeta(env: Env, type: CacheType | null): Promise<CacheMet
   for (const prefix of prefixes) {
     const listResult = await env.CACHE_META.list({ prefix, limit: 1000 });
     for (const key of listResult.keys) {
-      const value = await env.CACHE_META.get(key.name, "json") as CacheMeta | null;
-      if (value && value.cacheKeyUrl) {
-        items.push(value);
+      try {
+        const value = await env.CACHE_META.get(key.name, "json") as CacheMeta | null;
+        if (value && value.cacheKeyUrl) {
+          items.push(value);
+        }
+      } catch (error) {
+        console.error("Invalid cache meta JSON", { key: key.name, error });
       }
     }
   }
@@ -1223,9 +1440,13 @@ async function listCacheMetaPaginated(
   const items: CacheMeta[] = [];
 
   for (const key of listResult.keys) {
-    const value = await env.CACHE_META.get(key.name, "json") as CacheMeta | null;
-    if (value && value.cacheKeyUrl) {
-      items.push(value);
+    try {
+      const value = await env.CACHE_META.get(key.name, "json") as CacheMeta | null;
+      if (value && value.cacheKeyUrl) {
+        items.push(value);
+      }
+    } catch (error) {
+      console.error("Invalid cache meta JSON", { key: key.name, error });
     }
   }
 
@@ -1349,7 +1570,8 @@ function getCacheSyncLatestKey(): string {
 async function createCacheSyncJob(
   env: Env,
   type: CacheType | "all",
-  batchLimit: number
+  batchLimit: number,
+  concurrency: number
 ): Promise<CacheSyncJob> {
   const id = crypto.randomUUID();
   const prefixes = type === "all" ? ["plp:", "pdp:"] : [`${type}:`];
@@ -1371,6 +1593,7 @@ async function createCacheSyncJob(
     synced: 0,
     failed: 0,
     batchLimit,
+    concurrency,
     lastBatchMs: null,
     totalBatchMs: 0,
   };
@@ -1423,21 +1646,28 @@ async function runCacheSyncBatch(
     cursor: job.cursor || undefined,
   });
 
-  for (const key of listResult.keys) {
-    try {
-      const value = await env.CACHE_META.get(key.name, "json") as CacheMeta | null;
-      if (value && value.cacheKeyUrl) {
-        await syncCacheForMeta(env, ctx, value);
-        job.synced += 1;
-      } else {
+  const concurrency = Math.max(1, Math.min(20, job.concurrency || 1));
+  let index = 0;
+  const runWorker = async () => {
+    while (index < listResult.keys.length) {
+      const current = listResult.keys[index];
+      index += 1;
+      try {
+        const value = await env.CACHE_META.get(current.name, "json") as CacheMeta | null;
+        if (value && value.cacheKeyUrl) {
+          await syncCacheForMeta(env, ctx, value);
+          job.synced += 1;
+        } else {
+          job.failed += 1;
+        }
+      } catch {
         job.failed += 1;
+      } finally {
+        job.processed += 1;
       }
-    } catch {
-      job.failed += 1;
-    } finally {
-      job.processed += 1;
     }
-  }
+  };
+  await Promise.all(Array.from({ length: concurrency }, runWorker));
 
   if (listResult.list_complete) {
     job.prefixIndex += 1;
@@ -2176,6 +2406,7 @@ function getAdminHtml(): string {
         const [filterRegion, setFilterRegion] = React.useState('');
         const [filterCategory, setFilterCategory] = React.useState('');
         const [searchTerm, setSearchTerm] = React.useState('');
+        const [searchUrl, setSearchUrl] = React.useState('');
         const [cacheType, setCacheType] = React.useState('all');
         const [pageLimit, setPageLimit] = React.useState('100');
         const [nextCursor, setNextCursor] = React.useState('');
@@ -2185,6 +2416,7 @@ function getAdminHtml(): string {
         const [cacheSyncJob, setCacheSyncJob] = React.useState(null);
         const [cacheSyncAuto, setCacheSyncAuto] = React.useState(true);
         const [cacheSyncLimit, setCacheSyncLimit] = React.useState('10');
+        const [cacheSyncConcurrency, setCacheSyncConcurrency] = React.useState('5');
         const [cacheSyncTotalMs, setCacheSyncTotalMs] = React.useState(0);
 
         const loadCache = async (type, cursor, options = { reset: false }) => {
@@ -2234,15 +2466,80 @@ function getAdminHtml(): string {
           setPageIndex((prev) => Math.max(1, prev - 1));
           await loadCache(cacheType, cursor);
         };
-        const syncAll = async () => {
+        const searchBackend = async (query) => {
+          const trimmed = String(query || '').trim();
+          if (!trimmed) return;
           setLoading(true);
           setError('');
           try {
             const params = new URLSearchParams();
             params.set('type', cacheType);
+            const parsedLimit = parseInt(pageLimit, 10);
+            const safeLimit = Number.isFinite(parsedLimit) ? String(Math.min(parsedLimit, 200)) : '100';
+            params.set('limit', safeLimit);
+            params.set('query', trimmed);
+            const res = await fetch('/admin/cache/search?' + params.toString(), { credentials: 'same-origin' });
+            const data = await res.json();
+            if (!res.ok) {
+              setError(data && data.error ? data.error : 'Search failed.');
+              return;
+            }
+            setItems(data.items || []);
+            setSelected(null);
+            setNextCursor('');
+            setCursorHistory(['']);
+            setPageIndex(1);
+          } catch {
+            setError('Search failed.');
+          } finally {
+            setLoading(false);
+          }
+        };
+
+        const applySearchUrl = async () => {
+          const raw = searchUrl.trim();
+          if (!raw) return;
+          try {
+            const parsed = new URL(raw);
+            const slugMatch = parsed.pathname.match(/\\\/products\\\/([^\\/]+)\\\/?$/);
+            if (slugMatch) {
+              const slug = decodeURIComponent(slugMatch[1] || '');
+              setSearchTerm(slug);
+              await searchBackend(slug);
+              return;
+            }
+            const category = parsed.searchParams.get('category') || '';
+            const collection = parsed.searchParams.get('collection') || '';
+            const region = parsed.searchParams.get('region') || '';
+            if (region) {
+              setFilterRegion(region);
+            }
+            if (category) {
+              setFilterCategory(decodeURIComponent(category));
+            }
+            const searchValue = collection || category;
+            if (searchValue) {
+              const decoded = decodeURIComponent(searchValue);
+              setSearchTerm(decoded);
+              await searchBackend(decoded);
+            }
+          } catch {
+            setSearchTerm(raw);
+            await searchBackend(raw);
+          }
+        };
+        const syncAllWithType = async (type) => {
+          setLoading(true);
+          setError('');
+          try {
+            const params = new URLSearchParams();
+            params.set('type', type);
             const parsedLimit = parseInt(cacheSyncLimit, 10);
             const safeLimit = Number.isFinite(parsedLimit) ? String(parsedLimit) : '10';
             params.set('limit', safeLimit);
+            const parsedConcurrency = parseInt(cacheSyncConcurrency, 10);
+            const safeConcurrency = Number.isFinite(parsedConcurrency) ? String(Math.min(parsedConcurrency, 20)) : '5';
+            params.set('concurrency', safeConcurrency);
             const res = await fetch('/admin/cache/sync-all?' + params.toString(), { method: 'POST', credentials: 'same-origin' });
             const data = await res.json();
             if (data && data.jobId) {
@@ -2256,6 +2553,9 @@ function getAdminHtml(): string {
           } finally {
             setLoading(false);
           }
+        };
+        const syncAll = async () => {
+          await syncAllWithType(cacheType);
         };
 
         const loadPrewarm = async () => {
@@ -2420,7 +2720,7 @@ function getAdminHtml(): string {
               await loadCacheStats();
               await loadFirstPage();
             }
-          }, 30000);
+          }, 5000);
           return () => clearInterval(interval);
         }, [cacheSyncAuto, cacheSyncJob && cacheSyncJob.id]);
 
@@ -2561,7 +2861,27 @@ function getAdminHtml(): string {
               placeholder: 'sync batch',
               style: { padding: '8px', borderRadius: '8px', border: '1px solid #e5e7eb', width: '110px' }
             }),
+            e('input', {
+              value: cacheSyncConcurrency,
+              onChange: (e) => setCacheSyncConcurrency(e.target.value),
+              placeholder: 'sync concurrency',
+              style: { padding: '8px', borderRadius: '8px', border: '1px solid #e5e7eb', width: '130px' }
+            }),
             e('button', { className: 'secondary', onClick: () => syncAll() }, 'Sync All'),
+            e('button', {
+              className: 'secondary',
+              onClick: async () => {
+                setCacheType('plp');
+                await syncAllWithType('plp');
+              }
+            }, 'Sync All PLP'),
+            e('button', {
+              className: 'secondary',
+              onClick: async () => {
+                setCacheType('pdp');
+                await syncAllWithType('pdp');
+              }
+            }, 'Sync All PDP'),
             e('button', { className: 'danger', onClick: () => clear('all') }, 'Clear All'),
             e('button', { className: 'secondary', onClick: () => setShowPrewarm(!showPrewarm) },
               showPrewarm ? 'Hide Prewarm' : 'Show Prewarm'
@@ -2689,6 +3009,15 @@ function getAdminHtml(): string {
                   e('option', { key: cat.value, value: cat.value }, (cat.name || cat.value))
                 )
               )
+            ),
+            e('div', { className: 'controls' },
+              e('input', {
+                value: searchUrl,
+                onChange: (e) => setSearchUrl(e.target.value),
+                placeholder: 'paste category or product URL',
+                style: { padding: '8px', borderRadius: '8px', border: '1px solid #e5e7eb', minWidth: '360px' }
+              }),
+              e('button', { className: 'secondary', onClick: () => applySearchUrl() }, 'Apply URL')
             ),
             e('div', { className: 'controls' },
               e('button', { className: 'secondary', onClick: () => loadPrevPage(), disabled: cursorHistory.length <= 1 }, 'Prev'),

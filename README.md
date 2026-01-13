@@ -20,3 +20,16 @@ https://edge-api-layer-leem-prod.stagingleem.workers.dev
 
 wrangler deploy --env aura
 https://edge-api-layer-aura-prod.stagingleem.workers.dev
+
+
+wrangler tail --env aura --format=pretty
+
+wrangler tail --env leem --format=pretty
+
+
+npm run prewarm:decor
+LANGUAGE=ar npm run prewarm:decor  
+
+
+REGION=sa npm run prewarm:decor 
+REGION=sa LANGUAGE=ar npm run prewarm:decor  
