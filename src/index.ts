@@ -187,6 +187,7 @@ async function handleProductPostRequest(
     res.headers.set("x-edge-cache", "HIT");
     addCacheDebugHeaders(res, "edge", timings);
     addCorsHeaders(res, env, request);
+    ctx.waitUntil(ensureCacheMetaExists(env, "pdp", cacheKeyUrl, { synced: false, source: "post", requestBodyHash }));
     return res;
   }
 
@@ -201,6 +202,7 @@ async function handleProductPostRequest(
     res.headers.set("x-edge-cache", "HIT");
     addCacheDebugHeaders(res, "d1", timings);
     addCorsHeaders(res, env, request);
+    ctx.waitUntil(ensureCacheMetaExists(env, "pdp", cacheKeyUrl, { synced: false, source: "post", requestBodyHash }));
     return res;
   }
   const timingsMiss = { edge: Date.now() - edgeStart, d1: Date.now() - d1Start, total: Date.now() - totalStart };
@@ -214,6 +216,7 @@ async function handleProductPostRequest(
         status: backendResponse.status,
         headers: backendResponse.headers
       });
+      errorResponse.headers.set("cache-control", "no-store");
       return withCors(errorResponse, env, request);
     }
 
@@ -243,7 +246,7 @@ async function handleProductPostRequest(
     console.error(`Fetch failed for PDP ${slug}:`, error);
     const errorResponse = new Response(JSON.stringify({ error: "Service Unavailable" }), {
       status: 502,
-      headers: { "Content-Type": "application/json" }
+      headers: { "Content-Type": "application/json", "cache-control": "no-store" }
     });
     return withCors(errorResponse, env, request);
   }
@@ -255,7 +258,6 @@ async function handleProductListPostRequest(
   ctx: ExecutionContext
 ): Promise<Response> {
   const url = new URL(request.url);
-  console.log("PLP POST request", { url: url.toString() });
   const body = await parseJsonBody(request);
   if (!body) {
     const invalidResponse = new Response(JSON.stringify({ error: "Invalid JSON body" }), {
@@ -267,39 +269,10 @@ async function handleProductListPostRequest(
   const requestBodyHash = await hashRequestBody(body);
 
   const backendBody = normalizePlpBody(body);
-  const cacheKeyUrl = buildPlpCacheKeyUrl(url.origin, backendBody);
-  ctx.waitUntil(incrementVisit(env, "plp", cacheKeyUrl));
-  console.log("PLP POST cache key", { cacheKeyUrl });
-
-  const totalStart = Date.now();
-  const edgeStart = Date.now();
-  const edgeCached = await getEdgeCache(cacheKeyUrl);
-  if (edgeCached) {
-    const timings = { edge: Date.now() - edgeStart, d1: 0, total: Date.now() - totalStart };
-    console.log("PLP POST edge cache HIT", { cacheKeyUrl });
-    const res = new Response(edgeCached.body, edgeCached);
-    res.headers.set("x-edge-cache", "HIT");
-    addCacheDebugHeaders(res, "edge", timings);
-    addCorsHeaders(res, env, request);
-    return res;
+  const isCollection404 = backendBody.collection === "404";
+  if (isCollection404) {
+    console.log("PLP POST request", { url: url.toString() });
   }
-
-  const d1Start = Date.now();
-  const cachedResponse = await getSharedCache(env, cacheKeyUrl);
-  if (cachedResponse) {
-    const timings = { edge: Date.now() - edgeStart, d1: Date.now() - d1Start, total: Date.now() - totalStart };
-    console.log("PLP POST cache HIT", { cacheKeyUrl });
-    const cachedText = await cachedResponse.clone().text();
-    ctx.waitUntil(putEdgeCacheFromText(cacheKeyUrl, cachedText, cachedResponse.status, Object.fromEntries(cachedResponse.headers)));
-    const res = new Response(cachedResponse.body, cachedResponse);
-    res.headers.set("x-edge-cache", "HIT");
-    addCacheDebugHeaders(res, "d1", timings);
-    addCorsHeaders(res, env, request);
-    return res;
-  }
-  const timingsMiss = { edge: Date.now() - edgeStart, d1: Date.now() - d1Start, total: Date.now() - totalStart };
-  console.log("PLP POST cache MISS", { cacheKeyUrl });
-
   const incomingHeaders = request.headers;
   const backendHeaders: Record<string, string> = {
     "content-type": "application/json",
@@ -310,6 +283,94 @@ async function handleProductListPostRequest(
   const xFbp = incomingHeaders.get("x-fbp");
   if (xFbc) backendHeaders["x-fbc"] = xFbc;
   if (xFbp) backendHeaders["x-fbp"] = xFbp;
+  const cacheKeyUrl = buildPlpCacheKeyUrl(url.origin, backendBody);
+  ctx.waitUntil(incrementVisit(env, "plp", cacheKeyUrl));
+  if (isCollection404) {
+    console.log("PLP POST cache key", { cacheKeyUrl });
+    logCollection404("plp_post_request", request, url, {
+      cacheKeyUrl,
+      backendBody,
+      requestBody: body,
+      requestBodyHash,
+    });
+  }
+  if (isCollection404) {
+    try {
+      const backendResponse = await fetchPlpBackend(env, request, backendBody, backendHeaders, {
+        noCache: true,
+      });
+      const bodyText = await backendResponse.text();
+      const response = new Response(bodyText, {
+        status: backendResponse.status,
+        headers: {
+          "content-type": backendResponse.headers.get("content-type") || "application/json",
+          "cache-control": "no-store",
+        },
+      });
+      addCorsHeaders(response, env, request);
+      logCollection404Response("plp_post_nocache", response, bodyText, {
+        cacheKeyUrl,
+        backendBody,
+      });
+      return response;
+    } catch (error) {
+      console.error(`Fetch failed for PLP:`, error);
+      const errorResponse = new Response(JSON.stringify({ error: "Service Unavailable" }), {
+        status: 502,
+        headers: { "Content-Type": "application/json", "cache-control": "no-store" }
+      });
+      return withCors(errorResponse, env, request);
+    }
+  }
+
+  const totalStart = Date.now();
+  const edgeStart = Date.now();
+  const edgeCached = await getEdgeCache(cacheKeyUrl);
+  if (edgeCached) {
+    const timings = { edge: Date.now() - edgeStart, d1: 0, total: Date.now() - totalStart };
+    if (isCollection404) {
+      console.log("PLP POST edge cache HIT", { cacheKeyUrl });
+      const cachedText = await edgeCached.clone().text();
+      logCollection404Response("plp_post_edge_hit", edgeCached, cachedText, {
+        cacheKeyUrl,
+        backendBody,
+      });
+    }
+    const res = new Response(edgeCached.body, edgeCached);
+    res.headers.set("x-edge-cache", "HIT");
+    addCacheDebugHeaders(res, "edge", timings);
+    addCorsHeaders(res, env, request);
+    ctx.waitUntil(ensureCacheMetaExists(env, "plp", cacheKeyUrl, { synced: false, source: "post", requestBodyHash }));
+    return res;
+  }
+
+  const d1Start = Date.now();
+  const cachedResponse = await getSharedCache(env, cacheKeyUrl);
+  if (cachedResponse) {
+    const timings = { edge: Date.now() - edgeStart, d1: Date.now() - d1Start, total: Date.now() - totalStart };
+    if (isCollection404) {
+      console.log("PLP POST cache HIT", { cacheKeyUrl });
+    }
+    const cachedText = await cachedResponse.clone().text();
+    const itemCount = extractPlpItemCount(cachedText);
+    if (isCollection404) {
+      logCollection404Response("plp_post_d1_hit", cachedResponse, cachedText, {
+        cacheKeyUrl,
+        backendBody,
+      });
+    }
+    ctx.waitUntil(putEdgeCacheFromText(cacheKeyUrl, cachedText, cachedResponse.status, Object.fromEntries(cachedResponse.headers)));
+    const res = new Response(cachedResponse.body, cachedResponse);
+    res.headers.set("x-edge-cache", "HIT");
+    addCacheDebugHeaders(res, "d1", timings);
+    addCorsHeaders(res, env, request);
+    ctx.waitUntil(ensureCacheMetaExists(env, "plp", cacheKeyUrl, { synced: false, source: "post", requestBodyHash, itemCount }));
+    return res;
+  }
+  const timingsMiss = { edge: Date.now() - edgeStart, d1: Date.now() - d1Start, total: Date.now() - totalStart };
+  if (isCollection404) {
+    console.log("PLP POST cache MISS", { cacheKeyUrl });
+  }
 
   try {
     const debug = request.headers.get("x-prewarm-debug") === "1";
@@ -318,10 +379,18 @@ async function handleProductListPostRequest(
     });
     if (!backendResponse.ok) {
       console.error(`Backend list returned ${backendResponse.status}`);
+      if (isCollection404) {
+        const errorText = await backendResponse.clone().text();
+        logCollection404Response("plp_post_backend_error", backendResponse, errorText, {
+          cacheKeyUrl,
+          backendBody,
+        });
+      }
       const errorResponse = new Response(backendResponse.body, {
         status: backendResponse.status,
         headers: backendResponse.headers
       });
+      errorResponse.headers.set("cache-control", "no-store");
       return withCors(errorResponse, env, request);
     }
 
@@ -337,6 +406,12 @@ async function handleProductListPostRequest(
     edgeResponse.headers.set("x-edge-cache", "MISS");
     addCacheDebugHeaders(edgeResponse, "miss", timingsMiss);
     addCorsHeaders(edgeResponse, env, request);
+    if (isCollection404) {
+      logCollection404Response("plp_post_miss", edgeResponse, textBody, {
+        cacheKeyUrl,
+        backendBody,
+      });
+    }
 
     ctx.waitUntil(putSharedCacheFromText(env, cacheKeyUrl, textBody, edgeResponse.status, Object.fromEntries(edgeResponse.headers)));
     ctx.waitUntil(putEdgeCacheFromText(cacheKeyUrl, textBody, edgeResponse.status, Object.fromEntries(edgeResponse.headers)));
@@ -344,6 +419,7 @@ async function handleProductListPostRequest(
       synced: false,
       source: "post",
       requestBodyHash,
+      itemCount,
     }));
 
     return edgeResponse;
@@ -351,7 +427,7 @@ async function handleProductListPostRequest(
     console.error(`Fetch failed for PLP:`, error);
     const errorResponse = new Response(JSON.stringify({ error: "Service Unavailable" }), {
       status: 502,
-      headers: { "Content-Type": "application/json" }
+      headers: { "Content-Type": "application/json", "cache-control": "no-store" }
     });
     return withCors(errorResponse, env, request);
   }
@@ -388,6 +464,7 @@ async function handleProductRequest(
     res.headers.set("x-edge-cache", "HIT");
     addCacheDebugHeaders(res, "edge", timings);
     addCorsHeaders(res, env, request);
+    ctx.waitUntil(ensureCacheMetaExists(env, "pdp", cacheKeyUrl, { synced: false, source: "get" }));
     return res;
   }
 
@@ -402,6 +479,7 @@ async function handleProductRequest(
     res.headers.set("x-edge-cache", "HIT");
     addCacheDebugHeaders(res, "d1", timings);
     addCorsHeaders(res, env, request);
+    ctx.waitUntil(ensureCacheMetaExists(env, "pdp", cacheKeyUrl, { synced: false, source: "get" }));
     return res;
   }
   const timingsMiss = { edge: Date.now() - edgeStart, d1: Date.now() - d1Start, total: Date.now() - totalStart };
@@ -421,6 +499,7 @@ async function handleProductRequest(
             status: backendResponse.status,
             headers: backendResponse.headers
         });
+        errorResponse.headers.set("cache-control", "no-store");
         return withCors(errorResponse, env, request);
     }
 
@@ -449,7 +528,7 @@ async function handleProductRequest(
     console.error(`Fetch failed for PDP ${slug}:`, error);
     const errorResponse = new Response(JSON.stringify({ error: "Service Unavailable" }), {
         status: 502,
-        headers: { "Content-Type": "application/json" }
+        headers: { "Content-Type": "application/json", "cache-control": "no-store" }
     });
     return withCors(errorResponse, env, request);
   }
@@ -464,13 +543,60 @@ async function handleProductListRequest(
   ctx: ExecutionContext
 ): Promise<Response> {
   const url = new URL(request.url);
-  console.log("PLP GET request", { url: url.toString() });
 
   // Normalize cache key so equivalent query params don't create duplicates.
   const backendBody = buildPlpBodyFromUrl(url);
+  const isCollection404 = backendBody.collection === "404";
+  if (isCollection404) {
+    console.log("PLP GET request", { url: url.toString() });
+  }
   const cacheKeyUrl = buildPlpCacheKeyUrl(url.origin, backendBody);
   ctx.waitUntil(incrementVisit(env, "plp", cacheKeyUrl));
-  console.log("PLP GET cache key", { cacheKeyUrl });
+  if (isCollection404) {
+    console.log("PLP GET cache key", { cacheKeyUrl });
+    logCollection404("plp_get_request", request, url, {
+      cacheKeyUrl,
+      backendBody,
+    });
+  }
+  if (isCollection404) {
+    const incomingHeaders = request.headers;
+    const backendHeaders: Record<string, string> = {
+      "content-type": "application/json",
+      "accept": "application/json",
+    };
+    const xFbc = incomingHeaders.get("x-fbc");
+    const xFbp = incomingHeaders.get("x-fbp");
+    if (xFbc) backendHeaders["x-fbc"] = xFbc;
+    if (xFbp) backendHeaders["x-fbp"] = xFbp;
+
+    try {
+      const backendResponse = await fetchPlpBackend(env, request, backendBody, backendHeaders, {
+        noCache: true,
+      });
+      const bodyText = await backendResponse.text();
+      const response = new Response(bodyText, {
+        status: backendResponse.status,
+        headers: {
+          "content-type": backendResponse.headers.get("content-type") || "application/json",
+          "cache-control": "no-store",
+        },
+      });
+      addCorsHeaders(response, env, request);
+      logCollection404Response("plp_get_nocache", response, bodyText, {
+        cacheKeyUrl,
+        backendBody,
+      });
+      return response;
+    } catch (error) {
+      console.error(`Fetch failed for PLP:`, error);
+      const errorResponse = new Response(JSON.stringify({ error: "Service Unavailable" }), {
+        status: 502,
+        headers: { "Content-Type": "application/json", "cache-control": "no-store" }
+      });
+      return withCors(errorResponse, env, request);
+    }
+  }
 
   // 1. Try Cache
   const totalStart = Date.now();
@@ -478,11 +604,19 @@ async function handleProductListRequest(
   const edgeCached = await getEdgeCache(cacheKeyUrl);
   if (edgeCached) {
     const timings = { edge: Date.now() - edgeStart, d1: 0, total: Date.now() - totalStart };
-    console.log("PLP GET edge cache HIT", { cacheKeyUrl });
+    if (isCollection404) {
+      console.log("PLP GET edge cache HIT", { cacheKeyUrl });
+      const cachedText = await edgeCached.clone().text();
+      logCollection404Response("plp_get_edge_hit", edgeCached, cachedText, {
+        cacheKeyUrl,
+        backendBody,
+      });
+    }
     const res = new Response(edgeCached.body, edgeCached);
     res.headers.set("x-edge-cache", "HIT");
     addCacheDebugHeaders(res, "edge", timings);
     addCorsHeaders(res, env, request);
+    ctx.waitUntil(ensureCacheMetaExists(env, "plp", cacheKeyUrl, { synced: false, source: "get" }));
     return res;
   }
 
@@ -490,17 +624,29 @@ async function handleProductListRequest(
   const cachedResponse = await getSharedCache(env, cacheKeyUrl);
   if (cachedResponse) {
     const timings = { edge: Date.now() - edgeStart, d1: Date.now() - d1Start, total: Date.now() - totalStart };
-    console.log("PLP GET cache HIT", { cacheKeyUrl });
+    if (isCollection404) {
+      console.log("PLP GET cache HIT", { cacheKeyUrl });
+    }
     const cachedText = await cachedResponse.clone().text();
+    const itemCount = extractPlpItemCount(cachedText);
+    if (isCollection404) {
+      logCollection404Response("plp_get_d1_hit", cachedResponse, cachedText, {
+        cacheKeyUrl,
+        backendBody,
+      });
+    }
     ctx.waitUntil(putEdgeCacheFromText(cacheKeyUrl, cachedText, cachedResponse.status, Object.fromEntries(cachedResponse.headers)));
     const res = new Response(cachedResponse.body, cachedResponse);
     res.headers.set("x-edge-cache", "HIT");
     addCacheDebugHeaders(res, "d1", timings);
     addCorsHeaders(res, env, request);
+    ctx.waitUntil(ensureCacheMetaExists(env, "plp", cacheKeyUrl, { synced: false, source: "get", itemCount }));
     return res;
   }
   const timingsMiss = { edge: Date.now() - edgeStart, d1: Date.now() - d1Start, total: Date.now() - totalStart };
-  console.log("PLP GET cache MISS", { cacheKeyUrl });
+  if (isCollection404) {
+    console.log("PLP GET cache MISS", { cacheKeyUrl });
+  }
 
   const incomingHeaders = request.headers;
   const backendHeaders: Record<string, string> = {
@@ -517,12 +663,20 @@ async function handleProductListRequest(
     const backendResponse = await fetchPlpBackend(env, request, backendBody, backendHeaders);
 
     if (!backendResponse.ok) {
-        console.error(`Backend list returned ${backendResponse.status}`);
-        const errorResponse = new Response(backendResponse.body, {
-            status: backendResponse.status,
-            headers: backendResponse.headers
+      console.error(`Backend list returned ${backendResponse.status}`);
+      if (isCollection404) {
+        const errorText = await backendResponse.clone().text();
+        logCollection404Response("plp_get_backend_error", backendResponse, errorText, {
+          cacheKeyUrl,
+          backendBody,
         });
-        return withCors(errorResponse, env, request);
+      }
+      const errorResponse = new Response(backendResponse.body, {
+        status: backendResponse.status,
+        headers: backendResponse.headers
+      });
+      errorResponse.headers.set("cache-control", "no-store");
+      return withCors(errorResponse, env, request);
     }
 
     const textBody = await backendResponse.text();
@@ -538,10 +692,16 @@ async function handleProductListRequest(
     edgeResponse.headers.set("x-edge-cache", "MISS");
     addCacheDebugHeaders(edgeResponse, "miss", timingsMiss);
     addCorsHeaders(edgeResponse, env, request);
+    if (isCollection404) {
+      logCollection404Response("plp_get_miss", edgeResponse, textBody, {
+        cacheKeyUrl,
+        backendBody,
+      });
+    }
 
     ctx.waitUntil(putSharedCacheFromText(env, cacheKeyUrl, textBody, edgeResponse.status, Object.fromEntries(edgeResponse.headers)));
     ctx.waitUntil(putEdgeCacheFromText(cacheKeyUrl, textBody, edgeResponse.status, Object.fromEntries(edgeResponse.headers)));
-    ctx.waitUntil(recordCacheMeta(env, "plp", cacheKeyUrl, { synced: false, source: "get" }));
+    ctx.waitUntil(recordCacheMeta(env, "plp", cacheKeyUrl, { synced: false, source: "get", itemCount }));
 
     return edgeResponse;
 
@@ -549,7 +709,7 @@ async function handleProductListRequest(
     console.error(`Fetch failed for PLP:`, error);
     const errorResponse = new Response(JSON.stringify({ error: "Service Unavailable" }), {
         status: 502,
-        headers: { "Content-Type": "application/json" }
+        headers: { "Content-Type": "application/json", "cache-control": "no-store" }
     });
     return withCors(errorResponse, env, request);
   }
@@ -584,6 +744,7 @@ interface CacheMeta {
   lastSyncedAt?: string | null;
   source?: "get" | "post";
   requestBodyHash?: string | null;
+  itemCount?: number | null;
   visits?: number;
 }
 
@@ -771,6 +932,7 @@ async function handleVtexWebhook(request: Request, env: Env, ctx: ExecutionConte
       for (const language of languages) {
         const cacheKeyUrl = `${origin}/products/${encodeURIComponent(item.slug)}?region=${region}&language=${language}`;
         const rawBody = buildWebhookCacheBody(item.body);
+        const itemCount = extractPlpItemCount(rawBody);
         const headers = buildWebhookCacheHeaders(item.headers);
         const status = typeof item.status === "number" ? item.status : 200;
         await putSharedCacheFromText(env, cacheKeyUrl, rawBody, status, headers);
@@ -822,6 +984,7 @@ async function handleVtexWebhook(request: Request, env: Env, ctx: ExecutionConte
           synced: true,
           source: "post",
           requestBodyHash: null,
+          itemCount,
         });
         synced += 1;
       }
@@ -881,6 +1044,10 @@ async function handleAdminRequest(request: Request, env: Env, ctx: ExecutionCont
     const type = (url.searchParams.get("type") || "all").toLowerCase();
     const limitParam = url.searchParams.get("limit");
     const limit = limitParam ? Math.max(1, Math.min(200, parseInt(limitParam, 10))) : 50;
+    const cursorParam = url.searchParams.get("cursor");
+    const cursor = cursorParam || null;
+    const scanParam = url.searchParams.get("scan");
+    const maxPages = scanParam ? Math.max(1, Math.min(20, parseInt(scanParam, 10))) : 2;
     const queryRaw = url.searchParams.get("query") || url.searchParams.get("q") || "";
     const query = queryRaw.trim().toLowerCase();
     const includeVisits = url.searchParams.get("visits") === "1";
@@ -890,11 +1057,15 @@ async function handleAdminRequest(request: Request, env: Env, ctx: ExecutionCont
       return jsonResponse({ error: "Missing query" }, 400);
     }
 
-    let items = await listCacheMeta(env, type === "all" ? null : (type as CacheType));
-    items = items.filter((item) => item.cacheKeyUrl.toLowerCase().includes(query));
-    if (limit) {
-      items = items.slice(0, limit);
-    }
+    const searchResult = await searchCacheMetaPaginated(
+      env,
+      type === "all" ? null : (type as CacheType),
+      query,
+      limit,
+      cursor,
+      maxPages
+    );
+    let items = searchResult.items;
 
     if (includeVisits) {
       items = await Promise.all(items.map(async (item) => {
@@ -916,7 +1087,7 @@ async function handleAdminRequest(request: Request, env: Env, ctx: ExecutionCont
       }
     }
 
-    return jsonResponse({ items, synced, failed }, 200);
+    return jsonResponse({ items, synced, failed, nextCursor: searchResult.nextCursor }, 200);
   }
 
   if (pathname === "/admin/cache/stats" && request.method === "GET") {
@@ -946,6 +1117,36 @@ async function handleAdminRequest(request: Request, env: Env, ctx: ExecutionCont
 
     return jsonResponse({
       meta,
+      cache: cacheResult,
+      fresh: freshResult,
+    }, 200);
+  }
+
+  if (pathname === "/admin/cache/lookup" && request.method === "GET") {
+    const inputUrl = url.searchParams.get("url");
+    if (!inputUrl) {
+      return jsonResponse({ error: "Missing url" }, 400);
+    }
+    const resolved = resolveCacheKeyFromUrl(inputUrl, url.origin);
+    if (!resolved) {
+      return jsonResponse({ error: "Invalid url" }, 400);
+    }
+    const { type, cacheKeyUrl } = resolved;
+    const id = await hashCacheKey(type, cacheKeyUrl);
+    const metaKey = `${type}:${id}`;
+    const meta = await env.CACHE_META.get(metaKey, "json") as CacheMeta | null;
+    const now = formatUaeNow();
+    const fallbackMeta: CacheMeta = meta || {
+      id,
+      type,
+      cacheKeyUrl,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const cacheResult = await getCachedResponse(env, cacheKeyUrl);
+    const freshResult = await getFreshResponseForMeta(env, fallbackMeta);
+    return jsonResponse({
+      meta: fallbackMeta,
       cache: cacheResult,
       fresh: freshResult,
     }, 200);
@@ -1025,6 +1226,18 @@ async function handleAdminRequest(request: Request, env: Env, ctx: ExecutionCont
       await updateCacheSyncJob(env, job);
     }
     return jsonResponse(job, 200);
+  }
+
+  if (pathname === "/admin/cache/delete" && request.method === "POST") {
+    const id = url.searchParams.get("id");
+    if (!id) {
+      return jsonResponse({ error: "Missing id" }, 400);
+    }
+    const deleted = await deleteCacheById(env, id);
+    if (!deleted) {
+      return jsonResponse({ error: "Not found" }, 404);
+    }
+    return jsonResponse({ deleted: true }, 200);
   }
 
   if (pathname === "/admin/cache/clear" && request.method === "POST") {
@@ -1212,7 +1425,12 @@ async function recordCacheMeta(
   env: Env,
   type: CacheType,
   cacheKeyUrl: string,
-  options: { synced: boolean; source?: "get" | "post"; requestBodyHash?: string | null }
+  options: {
+    synced: boolean;
+    source?: "get" | "post";
+    requestBodyHash?: string | null;
+    itemCount?: number | null;
+  }
 ): Promise<void> {
   const id = await hashCacheKey(type, cacheKeyUrl);
   const key = `${type}:${id}`;
@@ -1228,9 +1446,30 @@ async function recordCacheMeta(
     lastSyncedAt: options.synced ? now : existing?.lastSyncedAt ?? null,
     source: options.source ?? existing?.source ?? "get",
     requestBodyHash: options.requestBodyHash ?? existing?.requestBodyHash ?? null,
+    itemCount: options.itemCount ?? existing?.itemCount ?? null,
   };
 
   await kvPutWithRetry(env, key, JSON.stringify(meta));
+}
+
+async function ensureCacheMetaExists(
+  env: Env,
+  type: CacheType,
+  cacheKeyUrl: string,
+  options: {
+    synced: boolean;
+    source?: "get" | "post";
+    requestBodyHash?: string | null;
+    itemCount?: number | null;
+  }
+): Promise<void> {
+  const id = await hashCacheKey(type, cacheKeyUrl);
+  const key = `${type}:${id}`;
+  const existing = await env.CACHE_META.get(key, "json") as CacheMeta | null;
+  if (existing) {
+    return;
+  }
+  await recordCacheMeta(env, type, cacheKeyUrl, { ...options });
 }
 
 function formatUaeNow(): string {
@@ -1271,6 +1510,11 @@ async function getSharedCache(env: Env, cacheKeyUrl: string): Promise<Response |
     return null;
   }
 
+  if (result.status !== 200) {
+    await deleteSharedCache(env, cacheKeyUrl);
+    return null;
+  }
+
   const now = Date.now();
   if (result.expires_at && result.expires_at <= now) {
     await deleteSharedCache(env, cacheKeyUrl);
@@ -1293,6 +1537,10 @@ async function getEdgeCache(cacheKeyUrl: string): Promise<Response | null> {
   if (!cachedResponse) {
     return null;
   }
+  if (cachedResponse.status !== 200) {
+    await caches.default.delete(cacheKey);
+    return null;
+  }
   return cachedResponse;
 }
 
@@ -1302,6 +1550,9 @@ async function putEdgeCacheFromText(
   status: number,
   headers: Record<string, string>
 ): Promise<void> {
+  if (status !== 200) {
+    return;
+  }
   const cacheKey = new Request(cacheKeyUrl, { method: "GET" });
   const cacheResponse = buildEdgeCacheResponse(body, status, headers);
   await caches.default.put(cacheKey, cacheResponse);
@@ -1331,6 +1582,9 @@ async function putSharedCacheFromText(
   status: number,
   headers: Record<string, string>
 ): Promise<void> {
+  if (status !== 200) {
+    return;
+  }
   const now = Date.now();
   const expiresAt = now + CACHE_TTL_SECONDS * 1000;
   await env.CACHE_DB.prepare(
@@ -1414,6 +1668,103 @@ async function listCacheMeta(env: Env, type: CacheType | null): Promise<CacheMet
   return items;
 }
 
+function buildSearchCursor(prefixIndex: number, cursor: string | null): string | null {
+  const safeCursor = cursor || "";
+  return `${prefixIndex}:${safeCursor}`;
+}
+
+function parseSearchCursor(cursor: string | null): { prefixIndex: number; cursor: string | null } {
+  if (!cursor) {
+    return { prefixIndex: 0, cursor: null };
+  }
+  const separatorIndex = cursor.indexOf(":");
+  if (separatorIndex === -1) {
+    return { prefixIndex: 0, cursor: cursor || null };
+  }
+  const prefixPart = cursor.slice(0, separatorIndex);
+  const rest = cursor.slice(separatorIndex + 1);
+  const parsedPrefix = parseInt(prefixPart, 10);
+  return {
+    prefixIndex: Number.isFinite(parsedPrefix) ? parsedPrefix : 0,
+    cursor: rest || null,
+  };
+}
+
+async function searchCacheMetaPaginated(
+  env: Env,
+  type: CacheType | null,
+  query: string,
+  limit: number,
+  cursor: string | null,
+  maxPages: number
+): Promise<{ items: CacheMeta[]; nextCursor: string | null }> {
+  const prefixes = type ? [`${type}:`] : ["plp:", "pdp:"];
+  const normalizedQuery = query.trim().toLowerCase();
+  const parsedCursor = parseSearchCursor(cursor);
+  let prefixIndex = Math.max(0, Math.min(parsedCursor.prefixIndex, prefixes.length - 1));
+  let kvCursor = parsedCursor.cursor || undefined;
+  const items: CacheMeta[] = [];
+  let pages = 0;
+  let nextCursor: string | null = null;
+  const listLimit = Math.max(50, Math.min(200, limit * 2));
+  const maxConcurrency = 10;
+
+  while (prefixIndex < prefixes.length && items.length < limit && pages < maxPages) {
+    const listResult = await env.CACHE_META.list({
+      prefix: prefixes[prefixIndex],
+      limit: listLimit,
+      cursor: kvCursor,
+    });
+    pages += 1;
+
+    for (let index = 0; index < listResult.keys.length; index += maxConcurrency) {
+      const slice = listResult.keys.slice(index, index + maxConcurrency);
+      const values = await Promise.all(slice.map(async (key) => {
+        try {
+          return await env.CACHE_META.get(key.name, "json") as CacheMeta | null;
+        } catch (error) {
+          console.error("Invalid cache meta JSON", { key: key.name, error });
+          return null;
+        }
+      }));
+      for (const value of values) {
+        if (value && value.cacheKeyUrl && value.cacheKeyUrl.toLowerCase().includes(normalizedQuery)) {
+          items.push(value);
+          if (items.length >= limit) {
+            break;
+          }
+        }
+      }
+      if (items.length >= limit) {
+        break;
+      }
+    }
+
+    if (items.length >= limit) {
+      if (listResult.list_complete) {
+        const nextPrefixIndex = prefixIndex + 1;
+        nextCursor = nextPrefixIndex < prefixes.length ? buildSearchCursor(nextPrefixIndex, null) : null;
+      } else {
+        nextCursor = buildSearchCursor(prefixIndex, listResult.cursor);
+      }
+      break;
+    }
+
+    if (listResult.list_complete) {
+      prefixIndex += 1;
+      kvCursor = undefined;
+    } else {
+      kvCursor = listResult.cursor;
+    }
+  }
+
+  if (!nextCursor && prefixIndex < prefixes.length) {
+    nextCursor = buildSearchCursor(prefixIndex, kvCursor || null);
+  }
+
+  return { items, nextCursor };
+}
+
 async function countCacheKeysForPrefix(env: Env, prefix: string): Promise<number> {
   let total = 0;
   let cursor: string | undefined = undefined;
@@ -1464,14 +1815,55 @@ async function clearCacheByType(
   const items = await listCacheMeta(env, type);
   let cleared = 0;
   for (const item of items) {
-    await deleteSharedCache(env, item.cacheKeyUrl);
-    const cacheKey = new Request(item.cacheKeyUrl, { method: "GET" });
-    await caches.default.delete(cacheKey);
+    await deleteCacheEntry(env, item.cacheKeyUrl);
     const metaKey = `${item.type}:${item.id}`;
     await env.CACHE_META.delete(metaKey);
     cleared += 1;
   }
   return cleared;
+}
+
+async function deleteCacheEntry(env: Env, cacheKeyUrl: string): Promise<void> {
+  await deleteSharedCache(env, cacheKeyUrl);
+  const cacheKey = new Request(cacheKeyUrl, { method: "GET" });
+  await caches.default.delete(cacheKey);
+}
+
+async function deleteCacheById(env: Env, id: string): Promise<boolean> {
+  const meta = await getCacheMeta(env, id);
+  if (!meta) {
+    return false;
+  }
+  await deleteCacheEntry(env, meta.cacheKeyUrl);
+  const metaKey = `${meta.type}:${meta.id}`;
+  await env.CACHE_META.delete(metaKey);
+  return true;
+}
+
+function resolveCacheKeyFromUrl(
+  inputUrl: string,
+  originForKey: string
+): { type: CacheType; cacheKeyUrl: string } | null {
+  try {
+    const parsed = new URL(inputUrl);
+    const pathname = parsed.pathname;
+    const slugMatch = pathname.match(/^\/products\/([^\/]+)\/?$/);
+    if (slugMatch) {
+      const slug = decodeURIComponent(slugMatch[1]);
+      const region = (parsed.searchParams.get("region") || "sa").toLowerCase();
+      const language = (parsed.searchParams.get("language") || "en").toLowerCase();
+      const cacheKeyUrl = `${originForKey}/products/${encodeURIComponent(slug)}?region=${region}&language=${language}`;
+      return { type: "pdp", cacheKeyUrl };
+    }
+    if (pathname === "/products" || pathname === "/products/") {
+      const backendBody = buildPlpBodyFromUrl(parsed);
+      const cacheKeyUrl = buildPlpCacheKeyUrl(originForKey, backendBody);
+      return { type: "plp", cacheKeyUrl };
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 async function getCacheMeta(env: Env, id: string): Promise<CacheMeta | null> {
@@ -1484,6 +1876,18 @@ async function getCacheMeta(env: Env, id: string): Promise<CacheMeta | null> {
 }
 
 async function getCachedResponse(env: Env, cacheKeyUrl: string): Promise<unknown> {
+  const edgeCached = await getEdgeCache(cacheKeyUrl);
+  if (edgeCached) {
+    const edgeText = await edgeCached.clone().text();
+    return {
+      hit: true,
+      status: edgeCached.status,
+      headers: Object.fromEntries(edgeCached.headers),
+      body: safeJsonParse(edgeText),
+      raw: edgeText,
+      source: "edge",
+    };
+  }
   const cachedResponse = await getSharedCache(env, cacheKeyUrl);
   if (!cachedResponse) {
     return { hit: false };
@@ -1496,12 +1900,14 @@ async function getCachedResponse(env: Env, cacheKeyUrl: string): Promise<unknown
     headers: Object.fromEntries(cachedResponse.headers),
     body: safeJsonParse(bodyText),
     raw: bodyText,
+    source: "d1",
   };
 }
 
 async function getFreshResponseForMeta(env: Env, meta: CacheMeta): Promise<unknown> {
   const requestUrl = new URL(meta.cacheKeyUrl);
   const fakeRequest = new Request(requestUrl.toString(), { method: "GET" });
+  const start = Date.now();
 
   if (meta.type === "pdp") {
     const slugMatch = requestUrl.pathname.match(/^\/products\/([^\/]+)\/?$/);
@@ -1512,7 +1918,9 @@ async function getFreshResponseForMeta(env: Env, meta: CacheMeta): Promise<unkno
     const region = (requestUrl.searchParams.get("region") || "sa").toLowerCase();
     const language = (requestUrl.searchParams.get("language") || "en").toLowerCase();
     const backendResponse = await fetchPdpBackend(env, fakeRequest, slug, region, language, { noCache: true });
-    return await describeResponse(backendResponse);
+    const described = await describeResponse(backendResponse) as Record<string, unknown>;
+    described.durationMs = Date.now() - start;
+    return described;
   }
 
   const backendBody = buildPlpBodyFromUrl(requestUrl);
@@ -1521,13 +1929,16 @@ async function getFreshResponseForMeta(env: Env, meta: CacheMeta): Promise<unkno
     "accept": "application/json",
   };
   const backendResponse = await fetchPlpBackend(env, fakeRequest, backendBody, backendHeaders, { noCache: true });
-  return await describeResponse(backendResponse);
+  const described = await describeResponse(backendResponse) as Record<string, unknown>;
+  described.durationMs = Date.now() - start;
+  return described;
 }
 
 async function syncCacheForMeta(env: Env, ctx: ExecutionContext, meta: CacheMeta): Promise<unknown> {
   const fresh = await getFreshResponseForMeta(env, meta);
   if ("status" in (fresh as Record<string, unknown>) && (fresh as any).raw) {
     const responseInfo = fresh as { status: number; headers: Record<string, string>; raw: string };
+    const itemCount = meta.type === "plp" ? extractPlpItemCount(responseInfo.raw) : null;
     const cacheResponse = buildEdgeCacheResponse(responseInfo.raw, responseInfo.status, responseInfo.headers);
     await putSharedCacheFromText(env, meta.cacheKeyUrl, responseInfo.raw, cacheResponse.status, Object.fromEntries(cacheResponse.headers));
     await putEdgeCacheFromText(meta.cacheKeyUrl, responseInfo.raw, cacheResponse.status, Object.fromEntries(cacheResponse.headers));
@@ -1535,6 +1946,7 @@ async function syncCacheForMeta(env: Env, ctx: ExecutionContext, meta: CacheMeta
       synced: true,
       source: meta.source,
       requestBodyHash: meta.requestBodyHash,
+      itemCount,
     });
   }
   return fresh;
@@ -1638,42 +2050,46 @@ async function runCacheSyncBatch(
     return job;
   }
 
-  const prefix = job.prefixes[job.prefixIndex];
   const batchStart = Date.now();
-  const listResult = await env.CACHE_META.list({
-    prefix,
-    limit: job.batchLimit,
-    cursor: job.cursor || undefined,
-  });
-
+  const maxBatchMs = 8000;
   const concurrency = Math.max(1, Math.min(20, job.concurrency || 1));
-  let index = 0;
-  const runWorker = async () => {
-    while (index < listResult.keys.length) {
-      const current = listResult.keys[index];
-      index += 1;
-      try {
-        const value = await env.CACHE_META.get(current.name, "json") as CacheMeta | null;
-        if (value && value.cacheKeyUrl) {
-          await syncCacheForMeta(env, ctx, value);
-          job.synced += 1;
-        } else {
-          job.failed += 1;
-        }
-      } catch {
-        job.failed += 1;
-      } finally {
-        job.processed += 1;
-      }
-    }
-  };
-  await Promise.all(Array.from({ length: concurrency }, runWorker));
 
-  if (listResult.list_complete) {
-    job.prefixIndex += 1;
-    job.cursor = null;
-  } else {
-    job.cursor = listResult.cursor;
+  while (job.prefixIndex < job.prefixes.length && Date.now() - batchStart < maxBatchMs) {
+    const prefix = job.prefixes[job.prefixIndex];
+    const listResult = await env.CACHE_META.list({
+      prefix,
+      limit: job.batchLimit,
+      cursor: job.cursor || undefined,
+    });
+
+    let index = 0;
+    const runWorker = async () => {
+      while (index < listResult.keys.length) {
+        const current = listResult.keys[index];
+        index += 1;
+        try {
+          const value = await env.CACHE_META.get(current.name, "json") as CacheMeta | null;
+          if (value && value.cacheKeyUrl) {
+            await syncCacheForMeta(env, ctx, value);
+            job.synced += 1;
+          } else {
+            job.failed += 1;
+          }
+        } catch {
+          job.failed += 1;
+        } finally {
+          job.processed += 1;
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: concurrency }, runWorker));
+
+    if (listResult.list_complete) {
+      job.prefixIndex += 1;
+      job.cursor = null;
+    } else {
+      job.cursor = listResult.cursor;
+    }
   }
 
   if (job.prefixIndex >= job.prefixes.length && job.cursor === null) {
@@ -1732,6 +2148,7 @@ async function describeResponse(response: Response): Promise<unknown> {
     headers: Object.fromEntries(response.headers),
     body: safeJsonParse(bodyText),
     raw: bodyText,
+    url: response.url,
   };
 }
 
@@ -2045,6 +2462,7 @@ async function runPrewarmBatch(
 
       const firstBodyText = await firstResponse.text();
       const data = safeJsonParse(firstBodyText) as Record<string, unknown> | null;
+      const itemCount = getPlpItemCount(data);
       const pagination = data?.pagination;
       const zeroProducts = isZeroProductResponse(data);
       let lastPage = 1;
@@ -2064,7 +2482,7 @@ async function runPrewarmBatch(
       const cacheResponse = buildEdgeCacheResponse(firstBodyText, firstResponse.status, Object.fromEntries(firstResponse.headers));
       await putSharedCacheFromText(env, cacheKeyUrl, firstBodyText, cacheResponse.status, Object.fromEntries(cacheResponse.headers));
       await putEdgeCacheFromText(cacheKeyUrl, firstBodyText, cacheResponse.status, Object.fromEntries(cacheResponse.headers));
-      await recordCacheMeta(env, "plp", cacheKeyUrl, { synced: false, source: "post" });
+      await recordCacheMeta(env, "plp", cacheKeyUrl, { synced: false, source: "post", itemCount });
 
       job.processed += 1;
       job.nextPage = 2;
@@ -2112,11 +2530,12 @@ async function runPrewarmBatch(
         );
       } else {
         const pageBodyText = await pageResponse.text();
+        const pageItemCount = extractPlpItemCount(pageBodyText);
         const pageCacheKeyUrl = buildPlpCacheKeyUrl(edgeOrigin, body);
         const pageCacheResponse = buildEdgeCacheResponse(pageBodyText, pageResponse.status, Object.fromEntries(pageResponse.headers));
         await putSharedCacheFromText(env, pageCacheKeyUrl, pageBodyText, pageCacheResponse.status, Object.fromEntries(pageCacheResponse.headers));
         await putEdgeCacheFromText(pageCacheKeyUrl, pageBodyText, pageCacheResponse.status, Object.fromEntries(pageCacheResponse.headers));
-        await recordCacheMeta(env, "plp", pageCacheKeyUrl, { synced: false, source: "post" });
+        await recordCacheMeta(env, "plp", pageCacheKeyUrl, { synced: false, source: "post", itemCount: pageItemCount });
       }
 
       job.processed += 1;
@@ -2170,6 +2589,41 @@ function isZeroProductResponse(data: Record<string, unknown> | null): boolean {
   return false;
 }
 
+function getPlpItemCount(data: unknown): number | null {
+  if (!data) {
+    return null;
+  }
+  if (Array.isArray(data)) {
+    return data.length;
+  }
+  if (typeof data !== "object") {
+    return null;
+  }
+  const record = data as Record<string, unknown>;
+  const listCandidates = [record.products, record.items, record.data];
+  for (const list of listCandidates) {
+    if (Array.isArray(list)) {
+      return list.length;
+    }
+  }
+  const nested = record.data;
+  if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+    const nestedObj = nested as Record<string, unknown>;
+    const nestedLists = [nestedObj.products, nestedObj.items, nestedObj.data];
+    for (const list of nestedLists) {
+      if (Array.isArray(list)) {
+        return list.length;
+      }
+    }
+  }
+  return null;
+}
+
+function extractPlpItemCount(rawBody: string): number | null {
+  const parsed = safeJsonParse(rawBody) as Record<string, unknown> | null;
+  return getPlpItemCount(parsed);
+}
+
 function buildEdgeCacheResponse(
   rawBody: string,
   status: number,
@@ -2184,6 +2638,40 @@ function buildEdgeCacheResponse(
   return new Response(rawBody, {
     status,
     headers: responseHeaders,
+  });
+}
+
+function logCollection404(
+  stage: string,
+  request: Request,
+  url: URL,
+  extra: Record<string, unknown> = {}
+) {
+  const headers = Object.fromEntries(request.headers);
+  const searchParams = Object.fromEntries(url.searchParams);
+  console.log("collection-404 trace", {
+    stage,
+    method: request.method,
+    url: url.toString(),
+    pathname: url.pathname,
+    searchParams,
+    headers,
+    ...extra,
+  });
+}
+
+function logCollection404Response(
+  stage: string,
+  response: Response,
+  bodyText: string,
+  extra: Record<string, unknown> = {}
+) {
+  console.log("collection-404 response", {
+    stage,
+    status: response.status,
+    headers: Object.fromEntries(response.headers),
+    body: bodyText,
+    ...extra,
   });
 }
 
@@ -2364,6 +2852,39 @@ function getAdminHtml(): string {
         margin-bottom: 12px;
       }
       .modal-header h3 { margin: 0; font-size: 16px; }
+      .spinner {
+        display: inline-block;
+        width: 12px;
+        height: 12px;
+        border: 2px solid #cbd5f5;
+        border-top-color: #111827;
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+        margin-left: 6px;
+        vertical-align: middle;
+      }
+      @keyframes spin {
+        to { transform: rotate(360deg); }
+      }
+      .compare-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+        margin-top: 12px;
+      }
+      .diff-block {
+        background: #f8fafc;
+        padding: 12px;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        max-height: 320px;
+        overflow: auto;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+        font-size: 12px;
+        line-height: 1.4;
+      }
+      .diff-line { white-space: pre; }
+      .diff-mismatch { background: #fee2e2; }
       pre {
         white-space: pre-wrap;
         background: #f8fafc;
@@ -2375,6 +2896,7 @@ function getAdminHtml(): string {
       }
       @media (max-width: 900px) {
         .layout { grid-template-columns: 1fr; }
+        .compare-grid { grid-template-columns: 1fr; }
       }
     </style>
   </head>
@@ -2398,15 +2920,19 @@ function getAdminHtml(): string {
         const [prewarmLimit, setPrewarmLimit] = React.useState('25');
         const [prewarmMaxPages, setPrewarmMaxPages] = React.useState('');
         const [prewarmCategory, setPrewarmCategory] = React.useState('');
-        const [showPrewarm, setShowPrewarm] = React.useState(true);
+        const [showPrewarm, setShowPrewarm] = React.useState(false);
         const [categories, setCategories] = React.useState([]);
         const [modalOpen, setModalOpen] = React.useState(false);
         const [autoContinue, setAutoContinue] = React.useState(true);
         const [activeJobId, setActiveJobId] = React.useState('');
         const [filterRegion, setFilterRegion] = React.useState('');
+        const [filterLanguage, setFilterLanguage] = React.useState('');
         const [filterCategory, setFilterCategory] = React.useState('');
+        const [filterCount, setFilterCount] = React.useState('');
         const [searchTerm, setSearchTerm] = React.useState('');
         const [searchUrl, setSearchUrl] = React.useState('');
+        const [searchCursor, setSearchCursor] = React.useState('');
+        const [searchMode, setSearchMode] = React.useState(false);
         const [cacheType, setCacheType] = React.useState('all');
         const [pageLimit, setPageLimit] = React.useState('100');
         const [nextCursor, setNextCursor] = React.useState('');
@@ -2415,13 +2941,21 @@ function getAdminHtml(): string {
         const [cacheStats, setCacheStats] = React.useState({ total: 0, plp: 0, pdp: 0 });
         const [cacheSyncJob, setCacheSyncJob] = React.useState(null);
         const [cacheSyncAuto, setCacheSyncAuto] = React.useState(true);
-        const [cacheSyncLimit, setCacheSyncLimit] = React.useState('10');
-        const [cacheSyncConcurrency, setCacheSyncConcurrency] = React.useState('5');
+        const [cacheSyncLimit, setCacheSyncLimit] = React.useState('50');
+        const [cacheSyncConcurrency, setCacheSyncConcurrency] = React.useState('10');
         const [cacheSyncTotalMs, setCacheSyncTotalMs] = React.useState(0);
+        const [syncing, setSyncing] = React.useState(false);
+        const [searching, setSearching] = React.useState(false);
+        const [compareMode, setCompareMode] = React.useState(false);
+        const [searchSyncing, setSearchSyncing] = React.useState(false);
+        const [searchSyncStatus, setSearchSyncStatus] = React.useState('');
+        const [searchSyncTotals, setSearchSyncTotals] = React.useState({ synced: 0, failed: 0, pages: 0 });
 
         const loadCache = async (type, cursor, options = { reset: false }) => {
           setLoading(true);
           setError('');
+          setSearchMode(false);
+          setSearchCursor('');
           try {
             const params = new URLSearchParams();
             const parsedLimit = parseInt(pageLimit, 10);
@@ -2466,9 +3000,10 @@ function getAdminHtml(): string {
           setPageIndex((prev) => Math.max(1, prev - 1));
           await loadCache(cacheType, cursor);
         };
-        const searchBackend = async (query) => {
+        const searchBackend = async (query, cursor = '') => {
           const trimmed = String(query || '').trim();
           if (!trimmed) return;
+          setSearching(true);
           setLoading(true);
           setError('');
           try {
@@ -2478,21 +3013,86 @@ function getAdminHtml(): string {
             const safeLimit = Number.isFinite(parsedLimit) ? String(Math.min(parsedLimit, 200)) : '100';
             params.set('limit', safeLimit);
             params.set('query', trimmed);
+            if (cursor) params.set('cursor', cursor);
             const res = await fetch('/admin/cache/search?' + params.toString(), { credentials: 'same-origin' });
             const data = await res.json();
             if (!res.ok) {
               setError(data && data.error ? data.error : 'Search failed.');
               return;
             }
-            setItems(data.items || []);
+            if (cursor) {
+              setItems((prev) => prev.concat(data.items || []));
+            } else {
+              setItems(data.items || []);
+            }
             setSelected(null);
             setNextCursor('');
             setCursorHistory(['']);
             setPageIndex(1);
+            setSearchMode(true);
+            setSearchCursor(data.nextCursor || '');
           } catch {
             setError('Search failed.');
           } finally {
             setLoading(false);
+            setSearching(false);
+          }
+        };
+        const startSearch = async () => {
+          setSearchCursor('');
+          await searchBackend(searchTerm, '');
+        };
+        const loadMoreSearch = async () => {
+          if (!searchCursor) return;
+          await searchBackend(searchTerm, searchCursor);
+        };
+        const syncSearchAll = async () => {
+          const query = String(searchTerm || '').trim();
+          if (!query) {
+            setError('Enter a search term first.');
+            return;
+          }
+          const maxPages = 50;
+          setSearchSyncing(true);
+          setSearchSyncStatus('Starting...');
+          setSearchSyncTotals({ synced: 0, failed: 0, pages: 0 });
+          setError('');
+          let cursor = '';
+          let totalSynced = 0;
+          let totalFailed = 0;
+          setSearchSyncStatus('');
+          let pages = 0;
+          try {
+            while (pages < maxPages) {
+              const params = new URLSearchParams();
+              params.set('type', cacheType);
+              params.set('limit', '200');
+              params.set('query', query);
+              params.set('sync', '1');
+              params.set('scan', '2');
+              if (cursor) params.set('cursor', cursor);
+              const res = await fetch('/admin/cache/search?' + params.toString(), { credentials: 'same-origin' });
+              const data = await res.json();
+              if (!res.ok) {
+                setError(data && data.error ? data.error : 'Sync search failed.');
+                break;
+              }
+              totalSynced += data.synced || 0;
+              totalFailed += data.failed || 0;
+              pages += 1;
+              setSearchSyncTotals({ synced: totalSynced, failed: totalFailed, pages });
+              setSearchSyncStatus('Synced ' + totalSynced + ' | Failed ' + totalFailed + ' | Pages ' + pages + '/' + maxPages);
+              if (!data.nextCursor) {
+                break;
+              }
+              cursor = data.nextCursor;
+            }
+          } catch {
+            setError('Sync search failed.');
+          } finally {
+            setSearchSyncing(false);
+            await loadCacheStats();
+            await loadFirstPage();
           }
         };
 
@@ -2505,7 +3105,8 @@ function getAdminHtml(): string {
             if (slugMatch) {
               const slug = decodeURIComponent(slugMatch[1] || '');
               setSearchTerm(slug);
-              await searchBackend(slug);
+              setSearchCursor('');
+              await searchBackend(slug, '');
               return;
             }
             const category = parsed.searchParams.get('category') || '';
@@ -2521,15 +3122,18 @@ function getAdminHtml(): string {
             if (searchValue) {
               const decoded = decodeURIComponent(searchValue);
               setSearchTerm(decoded);
-              await searchBackend(decoded);
+              setSearchCursor('');
+              await searchBackend(decoded, '');
             }
           } catch {
             setSearchTerm(raw);
-            await searchBackend(raw);
+            setSearchCursor('');
+            await searchBackend(raw, '');
           }
         };
         const syncAllWithType = async (type) => {
           setLoading(true);
+          setSyncing(true);
           setError('');
           try {
             const params = new URLSearchParams();
@@ -2552,6 +3156,7 @@ function getAdminHtml(): string {
             setError('Failed to start sync job.');
           } finally {
             setLoading(false);
+            setSyncing(false);
           }
         };
         const syncAll = async () => {
@@ -2664,6 +3269,37 @@ function getAdminHtml(): string {
           const data = await res.json();
           setSelected(data);
           setModalOpen(true);
+          setCompareMode(false);
+        };
+
+        const compare = async (id) => {
+          const res = await fetch('/admin/cache/item?id=' + id, { credentials: 'same-origin' });
+          const data = await res.json();
+          setSelected(data);
+          setModalOpen(true);
+          setCompareMode(true);
+        };
+
+        const lookupUrl = async () => {
+          const raw = searchUrl.trim();
+          if (!raw) return;
+          setLoading(true);
+          setError('');
+          try {
+            const res = await fetch('/admin/cache/lookup?url=' + encodeURIComponent(raw), { credentials: 'same-origin' });
+            const data = await res.json();
+            if (!res.ok) {
+              setError(data && data.error ? data.error : 'Lookup failed.');
+              return;
+            }
+            setSelected(data);
+            setModalOpen(true);
+            setCompareMode(true);
+          } catch {
+            setError('Lookup failed.');
+          } finally {
+            setLoading(false);
+          }
         };
 
         const sync = async (id) => {
@@ -2671,6 +3307,31 @@ function getAdminHtml(): string {
           const data = await res.json();
           setSelected((prev) => ({ ...prev, fresh: data }));
           await loadFirstPage();
+        };
+
+        const remove = async (id) => {
+          if (!id) return;
+          if (!confirm('Delete this cache entry?')) return;
+          setLoading(true);
+          setError('');
+          try {
+            const res = await fetch('/admin/cache/delete?id=' + id, { method: 'POST', credentials: 'same-origin' });
+            const data = await res.json();
+            if (!res.ok) {
+              setError(data && data.error ? data.error : 'Failed to delete cache entry.');
+              return;
+            }
+            if (selected && selected.meta && selected.meta.id === id) {
+              setSelected(null);
+              setModalOpen(false);
+            }
+            await loadCacheStats();
+            await loadFirstPage();
+          } catch {
+            setError('Failed to delete cache entry.');
+          } finally {
+            setLoading(false);
+          }
         };
 
         React.useEffect(() => {
@@ -2817,15 +3478,67 @@ function getAdminHtml(): string {
             return '-';
           }
         };
+        const getItemCount = (item) => {
+          return typeof item.itemCount === 'number' ? item.itemCount : null;
+        };
+        const tryFormatJson = (raw) => {
+          if (typeof raw !== 'string') {
+            return '';
+          }
+          const trimmed = raw.trim();
+          if (!trimmed) return '';
+          try {
+            const parsed = JSON.parse(trimmed);
+            return JSON.stringify(parsed, null, 2);
+          } catch {
+            return raw;
+          }
+        };
+        const getResponseRaw = (payload) => {
+          if (!payload) return '';
+          if (typeof payload.raw === 'string') {
+            return payload.raw;
+          }
+          return JSON.stringify(payload, null, 2);
+        };
+        const buildLineDiff = (leftText, rightText) => {
+          const left = tryFormatJson(leftText);
+          const right = tryFormatJson(rightText);
+          const newline = String.fromCharCode(10);
+          const leftLines = (left || '').split(newline);
+          const rightLines = (right || '').split(newline);
+          const max = Math.max(leftLines.length, rightLines.length);
+          const leftOut = [];
+          const rightOut = [];
+          let mismatches = 0;
+          for (let i = 0; i < max; i += 1) {
+            const leftLine = leftLines[i] ?? '';
+            const rightLine = rightLines[i] ?? '';
+            const mismatch = leftLine !== rightLine;
+            if (mismatch) mismatches += 1;
+            leftOut.push({ text: leftLine, mismatch });
+            rightOut.push({ text: rightLine, mismatch });
+          }
+          return { leftLines: leftOut, rightLines: rightOut, mismatches, left, right };
+        };
 
         const filteredItems = items.filter((item) => {
           const region = getRegion(item);
+          const language = getLanguage(item);
           const category = getCategoryName(item);
-          const regionOk = !filterRegion || region === filterRegion;
+          const regionFilter = filterRegion.trim().toLowerCase();
+          const languageFilter = filterLanguage.trim().toLowerCase();
+          const regionOk = !regionFilter || region === regionFilter;
+          const languageOk = !languageFilter || language === languageFilter;
           const categoryOk = !filterCategory || category === filterCategory;
+          const countFilter = filterCount.trim();
+          const parsedCount = countFilter ? parseInt(countFilter, 10) : NaN;
+          const countValue = Number.isFinite(parsedCount) ? parsedCount : null;
+          const itemCount = getItemCount(item);
+          const countOk = countValue === null || (item.type === 'plp' && itemCount === countValue);
           const search = searchTerm.trim().toLowerCase();
           if (!search) {
-            return regionOk && categoryOk;
+            return regionOk && languageOk && categoryOk && countOk;
           }
           const collection = getCollection(item);
           const slug = getSlug(item);
@@ -2833,7 +3546,7 @@ function getAdminHtml(): string {
             (category || '').toLowerCase().includes(search) ||
             (collection || '').toLowerCase().includes(search) ||
             (slug || '').toLowerCase().includes(search);
-          return regionOk && categoryOk && match;
+          return regionOk && languageOk && categoryOk && countOk && match;
         });
 
         return e('div', null,
@@ -2867,21 +3580,9 @@ function getAdminHtml(): string {
               placeholder: 'sync concurrency',
               style: { padding: '8px', borderRadius: '8px', border: '1px solid #e5e7eb', width: '130px' }
             }),
-            e('button', { className: 'secondary', onClick: () => syncAll() }, 'Sync All'),
-            e('button', {
-              className: 'secondary',
-              onClick: async () => {
-                setCacheType('plp');
-                await syncAllWithType('plp');
-              }
-            }, 'Sync All PLP'),
-            e('button', {
-              className: 'secondary',
-              onClick: async () => {
-                setCacheType('pdp');
-                await syncAllWithType('pdp');
-              }
-            }, 'Sync All PDP'),
+            e('button', { className: 'secondary', onClick: () => syncAll(), disabled: syncing },
+              syncing ? e('span', null, 'Syncing', e('span', { className: 'spinner' })) : 'Sync All'
+            ),
             e('button', { className: 'danger', onClick: () => clear('all') }, 'Clear All'),
             e('button', { className: 'secondary', onClick: () => setShowPrewarm(!showPrewarm) },
               showPrewarm ? 'Hide Prewarm' : 'Show Prewarm'
@@ -2994,10 +3695,28 @@ function getAdminHtml(): string {
                 style: { padding: '8px', borderRadius: '8px', border: '1px solid #e5e7eb', width: '140px' }
               }),
               e('input', {
+                value: filterLanguage,
+                onChange: (e) => setFilterLanguage(e.target.value),
+                placeholder: 'filter language',
+                style: { padding: '8px', borderRadius: '8px', border: '1px solid #e5e7eb', width: '140px' }
+              }),
+              e('input', {
                 value: searchTerm,
                 onChange: (e) => setSearchTerm(e.target.value),
                 placeholder: 'search slug/category/collection',
                 style: { padding: '8px', borderRadius: '8px', border: '1px solid #e5e7eb', minWidth: '240px' }
+              }),
+              e('button', { className: 'secondary', onClick: () => startSearch(), disabled: searching },
+                searching ? e('span', null, 'Searching', e('span', { className: 'spinner' })) : 'Search'
+              ),
+              e('button', { className: 'secondary', onClick: () => syncSearchAll(), disabled: searchSyncing },
+                searchSyncing ? e('span', null, 'Syncing', e('span', { className: 'spinner' })) : 'Sync Search'
+              ),
+              e('input', {
+                value: filterCount,
+                onChange: (e) => setFilterCount(e.target.value),
+                placeholder: 'filter count',
+                style: { padding: '8px', borderRadius: '8px', border: '1px solid #e5e7eb', width: '120px' }
               }),
               e('select', {
                 value: filterCategory,
@@ -3017,11 +3736,24 @@ function getAdminHtml(): string {
                 placeholder: 'paste category or product URL',
                 style: { padding: '8px', borderRadius: '8px', border: '1px solid #e5e7eb', minWidth: '360px' }
               }),
-              e('button', { className: 'secondary', onClick: () => applySearchUrl() }, 'Apply URL')
+              e('button', { className: 'secondary', onClick: () => applySearchUrl() }, 'Apply URL'),
+              e('button', { className: 'secondary', onClick: () => lookupUrl() }, 'Lookup URL')
             ),
+            searchSyncStatus
+              ? e('div', { className: 'panel', style: { marginBottom: '12px' } },
+                e('div', { className: 'item-title' }, 'Search Sync'),
+                e('div', { className: 'meta' },
+                  'Status: ', searchSyncing ? 'running' : 'done',
+                  ' | Synced: ', searchSyncTotals.synced,
+                  ' | Failed: ', searchSyncTotals.failed,
+                  ' | Pages: ', searchSyncTotals.pages, '/50'
+                )
+              )
+              : null,
             e('div', { className: 'controls' },
-              e('button', { className: 'secondary', onClick: () => loadPrevPage(), disabled: cursorHistory.length <= 1 }, 'Prev'),
-              e('button', { className: 'secondary', onClick: () => loadNextPage(), disabled: !nextCursor }, 'Next'),
+              e('button', { className: 'secondary', onClick: () => loadPrevPage(), disabled: cursorHistory.length <= 1 || searchMode }, 'Prev'),
+              e('button', { className: 'secondary', onClick: () => loadNextPage(), disabled: !nextCursor || searchMode }, 'Next'),
+              e('button', { className: 'secondary', onClick: () => loadMoreSearch(), disabled: !searchMode || !searchCursor }, 'More Results'),
               e('span', { className: 'meta' }, 'Page ', pageIndex)
             ),
             e('div', { className: 'table-wrap' },
@@ -3031,6 +3763,7 @@ function getAdminHtml(): string {
                       e('th', null, 'Type'),
                       e('th', null, 'Category/Slug/Collection'),
                       e('th', null, 'Page'),
+                      e('th', null, 'Count'),
                       e('th', null, 'Order'),
                       e('th', null, 'Region'),
                       e('th', null, 'Language'),
@@ -3049,6 +3782,7 @@ function getAdminHtml(): string {
                         e('td', null, item.type),
                         e('td', { className: 'mono' }, getCategoryDisplay(item)),
                         e('td', null, getPageNumber(item)),
+                        e('td', null, item.type === 'plp' ? (getItemCount(item) ?? '-') : '-'),
                         e('td', null, getOrder(item)),
                         e('td', null, getRegion(item)),
                         e('td', null, getLanguage(item)),
@@ -3061,7 +3795,11 @@ function getAdminHtml(): string {
                         e('td', null,
                           e('button', { className: 'secondary', onClick: () => view(item.id) }, 'View Cache'),
                           ' ',
-                          e('button', { className: 'danger', onClick: () => sync(item.id) }, 'Sync')
+                          e('button', { className: 'secondary', onClick: () => compare(item.id) }, 'Compare'),
+                          ' ',
+                          e('button', { className: 'secondary', onClick: () => sync(item.id) }, 'Sync'),
+                          ' ',
+                          e('button', { className: 'danger', onClick: () => remove(item.id) }, 'Delete')
                         )
                     )
                   )
@@ -3071,21 +3809,85 @@ function getAdminHtml(): string {
             modalOpen && selected ? e('div', { className: 'modal-backdrop', onClick: () => setModalOpen(false) },
               e('div', { className: 'modal', onClick: (event) => event.stopPropagation() },
                 e('div', { className: 'modal-header' },
-                  e('h3', null, 'Cached Response'),
-                  e('button', { className: 'secondary', onClick: () => setModalOpen(false) }, 'Close')
+                  e('h3', null, compareMode ? 'Compare Responses' : 'Cached Response'),
+                  e('div', null,
+                    e('button', { className: 'secondary', onClick: () => setModalOpen(false) }, 'Close'),
+                    ' ',
+                    e('button', { className: 'secondary', onClick: () => setCompareMode(!compareMode) },
+                      compareMode ? 'View Cache' : 'Compare'
+                    ),
+                    ' ',
+                    e('button', { className: 'danger', onClick: () => remove(selected.meta && selected.meta.id) }, 'Delete')
+                  )
                 ),
                 e('div', { className: 'meta' },
                   'Cache ID: ', selected.meta && selected.meta.id ? selected.meta.id : '-',
                   ' | Cache Key: ', selected.meta && selected.meta.cacheKeyUrl ? selected.meta.cacheKeyUrl : '-'
                 ),
-                e('pre', null, JSON.stringify(selected.cache, null, 2))
+                compareMode
+                  ? (() => {
+                      const cachedRaw = getResponseRaw(selected.cache);
+                      const freshRaw = getResponseRaw(selected.fresh);
+                      const diff = buildLineDiff(cachedRaw, freshRaw);
+                      const statusMatch = (selected.cache && selected.fresh) ? selected.cache.status === selected.fresh.status : false;
+                      const headerMatch = (selected.cache && selected.fresh)
+                        ? JSON.stringify(selected.cache.headers || {}) === JSON.stringify(selected.fresh.headers || {})
+                        : false;
+                      const rawMatch = diff.mismatches === 0;
+                      const matchLabel = statusMatch && headerMatch && rawMatch ? 'Match' : 'Mismatch';
+                      const freshUrl = selected.fresh && selected.fresh.url ? selected.fresh.url : '-';
+                      const duration = selected.fresh && typeof selected.fresh.durationMs === 'number'
+                        ? selected.fresh.durationMs + 'ms'
+                        : '-';
+                      return e('div', null,
+                        e('div', { className: 'meta' },
+                          'Status: ', statusMatch ? 'match' : 'mismatch',
+                          ' | Headers: ', headerMatch ? 'match' : 'mismatch',
+                          ' | Body: ', rawMatch ? 'match' : 'mismatch',
+                          ' | Result: ', matchLabel
+                        ),
+                        e('div', { className: 'meta' },
+                          'Fresh URL: ', freshUrl,
+                          ' | Duration: ', duration
+                        ),
+                        e('div', { className: 'compare-grid' },
+                          e('div', null,
+                            e('div', { className: 'meta' }, 'Cached'),
+                            e('div', { className: 'diff-block' },
+                              diff.leftLines.map((line, idx) =>
+                                e('div', { key: 'l' + idx, className: 'diff-line' + (line.mismatch ? ' diff-mismatch' : '') }, line.text || ' ')
+                              )
+                            )
+                          ),
+                          e('div', null,
+                            e('div', { className: 'meta' }, 'Fresh (api.auraliving.com)'),
+                            e('div', { className: 'diff-block' },
+                              diff.rightLines.map((line, idx) =>
+                                e('div', { key: 'r' + idx, className: 'diff-line' + (line.mismatch ? ' diff-mismatch' : '') }, line.text || ' ')
+                              )
+                            )
+                          )
+                        )
+                      );
+                    })()
+                  : e('pre', null, JSON.stringify(selected.cache, null, 2))
               )
             ) : null
           )
         );
       }
 
-      ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));
+      const root = document.getElementById('root');
+      if (root) {
+        root.textContent = 'Loading...';
+        try {
+          ReactDOM.createRoot(root).render(React.createElement(App));
+        } catch (error) {
+          const message = error && error.message ? error.message : String(error);
+          root.textContent = 'Admin failed to load: ' + message;
+          console.error(error);
+        }
+      }
     </script>
   </body>
 </html>`;
