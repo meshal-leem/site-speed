@@ -17,6 +17,7 @@ interface Env {
 }
 
 const CACHE_TTL_SECONDS = 60 * 60 * 24 * 7;
+const BYPASS_CACHE = true;
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -177,6 +178,33 @@ async function handleProductPostRequest(
   ctx.waitUntil(incrementVisit(env, "pdp", cacheKeyUrl));
   console.log("PDP POST cache key", { cacheKeyUrl });
 
+  if (BYPASS_CACHE) {
+    try {
+      const backendResponse = await fetchPdpBackend(env, request, slug, region, language, { noCache: true });
+      if (!backendResponse.ok) {
+        console.error(`Backend returned ${backendResponse.status} for slug: ${slug}`);
+        const errorResponse = new Response(backendResponse.body, {
+          status: backendResponse.status,
+          headers: backendResponse.headers
+        });
+        errorResponse.headers.set("cache-control", "no-store");
+        return withCors(errorResponse, env, request);
+      }
+
+      const response = buildNoStoreResponse(backendResponse);
+      response.headers.set("x-edge-cache", "BYPASS");
+      addCorsHeaders(response, env, request);
+      return response;
+    } catch (error) {
+      console.error(`Fetch failed for PDP ${slug}:`, error);
+      const errorResponse = new Response(JSON.stringify({ error: "Service Unavailable" }), {
+        status: 502,
+        headers: { "Content-Type": "application/json", "cache-control": "no-store" }
+      });
+      return withCors(errorResponse, env, request);
+    }
+  }
+
   const totalStart = Date.now();
   const edgeStart = Date.now();
   const edgeCached = await getEdgeCache(cacheKeyUrl);
@@ -323,6 +351,33 @@ async function handleProductListPostRequest(
     }
   }
 
+  if (BYPASS_CACHE) {
+    try {
+      const backendResponse = await fetchPlpBackend(env, request, backendBody, backendHeaders, { noCache: true });
+      if (!backendResponse.ok) {
+        console.error(`Backend list returned ${backendResponse.status}`);
+        const errorResponse = new Response(backendResponse.body, {
+          status: backendResponse.status,
+          headers: backendResponse.headers
+        });
+        errorResponse.headers.set("cache-control", "no-store");
+        return withCors(errorResponse, env, request);
+      }
+
+      const response = buildNoStoreResponse(backendResponse);
+      response.headers.set("x-edge-cache", "BYPASS");
+      addCorsHeaders(response, env, request);
+      return response;
+    } catch (error) {
+      console.error(`Fetch failed for PLP:`, error);
+      const errorResponse = new Response(JSON.stringify({ error: "Service Unavailable" }), {
+        status: 502,
+        headers: { "Content-Type": "application/json", "cache-control": "no-store" }
+      });
+      return withCors(errorResponse, env, request);
+    }
+  }
+
   const totalStart = Date.now();
   const edgeStart = Date.now();
   const edgeCached = await getEdgeCache(cacheKeyUrl);
@@ -452,6 +507,33 @@ async function handleProductRequest(
   const cacheKeyUrl = `${url.origin}/products/${slug}?region=${region}&language=${language}`;
   ctx.waitUntil(incrementVisit(env, "pdp", cacheKeyUrl));
   console.log("PDP GET cache key", { cacheKeyUrl });
+
+  if (BYPASS_CACHE) {
+    try {
+      const backendResponse = await fetchPdpBackend(env, request, slug, region, language, { noCache: true });
+      if (!backendResponse.ok) {
+        console.error(`Backend returned ${backendResponse.status} for slug: ${slug}`);
+        const errorResponse = new Response(backendResponse.body, {
+          status: backendResponse.status,
+          headers: backendResponse.headers
+        });
+        errorResponse.headers.set("cache-control", "no-store");
+        return withCors(errorResponse, env, request);
+      }
+
+      const response = buildNoStoreResponse(backendResponse);
+      response.headers.set("x-edge-cache", "BYPASS");
+      addCorsHeaders(response, env, request);
+      return response;
+    } catch (error) {
+      console.error(`Fetch failed for PDP ${slug}:`, error);
+      const errorResponse = new Response(JSON.stringify({ error: "Service Unavailable" }), {
+        status: 502,
+        headers: { "Content-Type": "application/json", "cache-control": "no-store" }
+      });
+      return withCors(errorResponse, env, request);
+    }
+  }
 
   // 1. Try Cache
   const totalStart = Date.now();
@@ -587,6 +669,44 @@ async function handleProductListRequest(
         cacheKeyUrl,
         backendBody,
       });
+      return response;
+    } catch (error) {
+      console.error(`Fetch failed for PLP:`, error);
+      const errorResponse = new Response(JSON.stringify({ error: "Service Unavailable" }), {
+        status: 502,
+        headers: { "Content-Type": "application/json", "cache-control": "no-store" }
+      });
+      return withCors(errorResponse, env, request);
+    }
+  }
+
+  if (BYPASS_CACHE) {
+    const incomingHeaders = request.headers;
+    const backendHeaders: Record<string, string> = {
+      "content-type": "application/json",
+      "accept": "application/json",
+    };
+
+    const xFbc = incomingHeaders.get("x-fbc");
+    const xFbp = incomingHeaders.get("x-fbp");
+    if (xFbc) backendHeaders["x-fbc"] = xFbc;
+    if (xFbp) backendHeaders["x-fbp"] = xFbp;
+
+    try {
+      const backendResponse = await fetchPlpBackend(env, request, backendBody, backendHeaders, { noCache: true });
+      if (!backendResponse.ok) {
+        console.error(`Backend list returned ${backendResponse.status}`);
+        const errorResponse = new Response(backendResponse.body, {
+          status: backendResponse.status,
+          headers: backendResponse.headers
+        });
+        errorResponse.headers.set("cache-control", "no-store");
+        return withCors(errorResponse, env, request);
+      }
+
+      const response = buildNoStoreResponse(backendResponse);
+      response.headers.set("x-edge-cache", "BYPASS");
+      addCorsHeaders(response, env, request);
       return response;
     } catch (error) {
       console.error(`Fetch failed for PLP:`, error);
@@ -1344,6 +1464,16 @@ function jsonResponse(body: unknown, status: number): Response {
     status,
     headers: {
       "content-type": "application/json",
+      "cache-control": "no-store",
+    },
+  });
+}
+
+function buildNoStoreResponse(backendResponse: Response): Response {
+  return new Response(backendResponse.body, {
+    status: backendResponse.status,
+    headers: {
+      "content-type": backendResponse.headers.get("content-type") || "application/json",
       "cache-control": "no-store",
     },
   });
